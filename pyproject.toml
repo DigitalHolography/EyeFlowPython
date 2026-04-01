@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eyeflow-python"
+version = "0.1.0"
+description = "Python rewrite of EyeFlow focused on downstream H5-based analysis."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+  "h5py>=3.10",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+gui = [
+  "streamlit>=1.44",
+]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+eyeflow = "eyeflow.cli:main"
+eyeflow-gui = "eyeflow.gui.launcher:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

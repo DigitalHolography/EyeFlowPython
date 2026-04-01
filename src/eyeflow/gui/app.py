@@ -1,57 +1,65 @@
-"""Initial Streamlit GUI entrypoint for EyeFlow."""
+"""Streamlit GUI focused on the EyeFlow metrics backlog."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import streamlit as st
+
+from eyeflow.gui.metrics_catalog import METRIC_GROUPS, iter_metrics
 
 
 def main() -> None:
     st.set_page_config(
-        page_title="EyeFlowPython",
+        page_title="EyeFlow Metrics",
         layout="wide",
     )
 
-    st.title("EyeFlowPython")
-    st.caption("Downstream H5 analysis for precomputed EyeFlow inputs.")
+    st.title("EyeFlow metrics backlog")
+    st.caption("Single-screen checklist of the MATLAB metrics that still need Python implementations.")
 
-    st.markdown(
-        """
-        This is the initial GUI scaffold.
+    total_metrics = len(iter_metrics())
+    total_groups = len(METRIC_GROUPS)
 
-        Current state:
+    backlog_tab = st.tabs(["Metrics to implement"])[0]
 
-        - the Python package is installed
-        - the CLI validator is available
-        - the Streamlit app can be launched from the package
+    with backlog_tab:
+        search = st.text_input(
+            "Filter metrics",
+            placeholder="Search by metric name, description, or MATLAB source file",
+        ).strip().lower()
 
-        The analysis workflow itself will be added incrementally.
-        """
-    )
+        selected_groups = st.multiselect(
+            "Filter groups",
+            options=[group.title for group in METRIC_GROUPS],
+            default=[group.title for group in METRIC_GROUPS],
+        )
 
-    st.subheader("Current Launch Options")
-    st.code("eyeflow validate <input_path>", language="bash")
-    st.code("eyeflow-gui", language="bash")
+        left_col, right_col = st.columns(2)
+        left_col.metric("Tracked outputs", total_metrics)
+        right_col.metric("Metric groups", total_groups)
 
-    st.subheader("Expected Input")
-    st.markdown(
-        """
-        The application expects H5 inputs containing:
+        for group in METRIC_GROUPS:
+            if group.title not in selected_groups:
+                continue
 
-        - `/moment0`
-        - `/moment1`
-        - `/moment2`
-        - `/masks/artery`
-        - `/masks/vein`
-        - metadata for timing and spatial calibration
-        """
-    )
+            rows = [
+                {
+                    "Metric": item.name,
+                    "Description": item.description,
+                    "MATLAB source": item.source,
+                }
+                for item in group.items
+                if not search
+                or search in item.name.lower()
+                or search in item.description.lower()
+                or search in item.source.lower()
+            ]
 
-    st.subheader("Project Files")
-    readme_path = Path.cwd() / "README.md"
-    st.write(f"Working directory: `{Path.cwd()}`")
-    st.write(f"README detected: `{readme_path.exists()}`")
+            if not rows:
+                continue
+
+            with st.expander(f"{group.title} ({len(rows)})", expanded=True):
+                st.caption(group.description)
+                st.dataframe(rows, width="stretch", hide_index=True)
 
 
 if __name__ == "__main__":

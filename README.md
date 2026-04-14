@@ -1,1 +1,1 @@
-# EyeFlowPython
+EyeFlow is a quantitative analysis platform for retinal hemodynamics using Doppler holography. It combines HoloDoppler outputs with DopplerView-derived image enhancement, vascular segmentation, and topology inference to generate structured, reproducible, and analysis-ready measurements of retinal blood flow.

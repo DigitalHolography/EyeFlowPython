@@ -1,0 +1,19 @@
+{
+  "pipeline_visibility": {
+    "Windkessel_RC": false,
+    "lowrank_pulsatility_metrics": false,
+    "modal_analysis": false,
+    "waveform_harmonic_organization": false,
+    "waveform_harmonic_organization_SVD": false,
+    "waveform_shape_metrics": true
+  },
+  "postprocess_visibility": {
+    "Pipeline Metrics Manifest": false,
+    "Postprocess Tutorial": false,
+    "QC_Windkessel_RC": false,
+    "Variability and heterogeneity tables": false,
+    "groups comparison dashboard": false
+  },
+  "trim_h5source": true,
+  "ui_mode": "minimal"
+}

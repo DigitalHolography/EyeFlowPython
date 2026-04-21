@@ -17,7 +17,7 @@ class WindkesselRC(ProcessPipeline):
       3) discrete-time ARX one-pole fit
 
     In addition to the estimates themselves, the pipeline emits low-level QC primitives
-    intended to support downstream batch QC in src/postprocess:
+    intended to support downstream batch QC workflows:
       - input/prepared valid fractions
       - per-beat fit residuals / normalized residuals
       - harmonic support and frequency self-consistency diagnostics
@@ -29,7 +29,7 @@ class WindkesselRC(ProcessPipeline):
     description = (
         "Beat-resolved artery-vein Windkessel RC analysis from global arterial and venous "
         "waveforms using frequency-domain, time-domain integral, and ARX estimators, "
-        "with intrinsic QC primitives for downstream postprocessing."
+        "with intrinsic QC primitives for downstream QC review."
     )
 
     v_raw_global_input_artery = "/Artery/VelocityPerBeat/VelocitySignalPerBeat/value"

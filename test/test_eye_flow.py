@@ -29,12 +29,6 @@ fake_pipeline_utils = types.ModuleType("pipelines.core.utils")
 fake_pipeline_utils.write_combined_results_h5 = lambda *args, **kwargs: None
 sys.modules.setdefault("pipelines.core.utils", fake_pipeline_utils)
 
-fake_postprocess = types.ModuleType("postprocess")
-fake_postprocess.PostprocessContext = object
-fake_postprocess.PostprocessDescriptor = object
-fake_postprocess.load_postprocess_catalog = lambda: ([], [])
-sys.modules.setdefault("postprocess", fake_postprocess)
-
 from eye_flow import ProcessApp  # noqa: E402
 
 for _module_name in (
@@ -43,7 +37,6 @@ for _module_name in (
     "pipelines.core",
     "pipelines.core.errors",
     "pipelines.core.utils",
-    "postprocess",
 ):
     _module = sys.modules.get(_module_name)
     if _module is not None and getattr(_module, "__file__", None) is None:
@@ -103,37 +96,33 @@ class BatchZipCleanupTests(unittest.TestCase):
             ui_mode="advanced",
             _progress_total_units=1.0,
             _progress_completed_units=0.0,
+            _progress_primary_style="MinimalPrimary.Horizontal.TProgressbar",
+            _progress_final_style="MinimalFinal.Horizontal.TProgressbar",
             pipeline_rows=[SimpleNamespace(name="Demo", available=True)],
-            postprocess_rows=[],
             pipeline_visibility={"Demo": True},
-            postprocess_visibility={},
             pipeline_registry={"Demo": object()},
-            postprocess_registry={},
-            _validate_postprocess_selection=lambda *args, **kwargs: [],
             _reset_batch_output=lambda *args, **kwargs: None,
             _prepare_data_root=lambda _path: (data_root, None),
             _find_h5_inputs=lambda _path: [h5_path],
             _relative_input_parent=lambda *args, **kwargs: Path("."),
             _run_pipelines_on_file=_run_pipelines_on_file,
-            _run_postprocesses=lambda *args, **kwargs: None,
             _zip_output_dir=_zip_output_dir,
             _log_batch=logs.append,
             _show_batch_error_dialog=lambda *args, **kwargs: None,
             _reset_progress=lambda: None,
-            _start_progress=lambda total_units: None,
+            _start_progress=lambda *args, **kwargs: None,
             _set_progress_units=lambda completed_units: None,
             _advance_progress=lambda units=1.0: None,
             _minimal_output_filename_for_run=lambda _data_path, _inputs: None,
+            _set_minimal_status=lambda _text: None,
             update=lambda: None,
             logs=logs,
         )
 
     @mock.patch("eye_flow.messagebox.showwarning")
     @mock.patch("eye_flow.messagebox.showerror")
-    @mock.patch("eye_flow.messagebox.showinfo")
     def test_run_batch_removes_temp_output_dir_after_successful_zip(
         self,
-        showinfo,
         _showerror,
         _showwarning,
     ) -> None:
@@ -157,14 +146,14 @@ class BatchZipCleanupTests(unittest.TestCase):
                 [base_output_dir / "outputs.zip"],
                 sorted(base_output_dir.iterdir()),
             )
-            self.assertIn("outputs.zip", showinfo.call_args.args[1])
+            self.assertTrue(
+                any("Completed. ZIP archive:" in line for line in app.logs),
+            )
 
     @mock.patch("eye_flow.messagebox.showwarning")
     @mock.patch("eye_flow.messagebox.showerror")
-    @mock.patch("eye_flow.messagebox.showinfo")
     def test_run_batch_keeps_work_dir_when_zip_creation_fails(
         self,
-        showinfo,
         showerror,
         _showwarning,
     ) -> None:
@@ -189,7 +178,9 @@ class BatchZipCleanupTests(unittest.TestCase):
                 (work_dirs[0] / "sample_pipelines_result.h5").exists(),
             )
             self.assertFalse((base_output_dir / "outputs.zip").exists())
-            self.assertIn(str(work_dirs[0]), showinfo.call_args.args[1])
+            self.assertTrue(
+                any(str(work_dirs[0]) in line for line in app.logs),
+            )
             self.assertEqual("Zip failed", showerror.call_args.args[0])
 
     def test_apply_input_defaults_for_zip_input(self) -> None:
@@ -205,6 +196,7 @@ class BatchZipCleanupTests(unittest.TestCase):
                 _default_output_stem=lambda input_path: f"{input_path.stem}_eyeflow",
                 _default_archive_name=lambda input_path: f"{input_path.stem}_eyeflow.zip",
                 _reset_progress=lambda: None,
+                _set_minimal_status=lambda _text: None,
             )
 
             ProcessApp._apply_input_defaults(app, input_path)

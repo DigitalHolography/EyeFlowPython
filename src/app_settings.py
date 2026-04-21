@@ -137,12 +137,6 @@ def normalize_pipeline_visibility(
     return normalize_named_visibility(pipeline_names, stored_visibility)
 
 
-def normalize_postprocess_visibility(
-    postprocess_names: Iterable[str], stored_visibility: Mapping[str, bool] | None
-) -> tuple[dict[str, bool], bool]:
-    return normalize_named_visibility(postprocess_names, stored_visibility)
-
-
 class AppSettingsStore:
     def __init__(
         self,
@@ -206,12 +200,6 @@ class AppSettingsStore:
 
     def save_pipeline_visibility(self, visibility: Mapping[str, bool]) -> None:
         self.save_named_visibility("pipeline_visibility", visibility)
-
-    def load_postprocess_visibility(self) -> dict[str, bool]:
-        return self.load_named_visibility("postprocess_visibility")
-
-    def save_postprocess_visibility(self, visibility: Mapping[str, bool]) -> None:
-        self.save_named_visibility("postprocess_visibility", visibility)
 
     def load_ui_mode(self) -> str:
         mode = self.load().get("ui_mode")

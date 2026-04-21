@@ -30,7 +30,7 @@ PAYLOAD_EXTRA_FILES = (
     PROJECT_ROOT / "default_settings.json",
     PROJECT_ROOT / "pyproject.toml",
 )
-EDITABLE_PACKAGE_DIRS = ("pipelines", "postprocess")
+EDITABLE_PACKAGE_DIRS = ("pipelines",)
 
 
 def _parse_args() -> argparse.Namespace:

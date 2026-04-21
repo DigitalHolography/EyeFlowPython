@@ -35,16 +35,13 @@ pip install -e .
 
 # Installs pipeline-specific dependencies (optional)
 pip install -e ".[pipelines]"
-
-# Installs postprocess-specific dependencies such as the graphics dashboard (optional)
-pip install -e ".[postprocess]"
 ```
 
 ### 2. Development Setup (Contributor)
 
 ```sh
 # Install all dependencies including dev tools (ruff, pre-commit, pyinstaller)
-pip install -e ".[dev,pipelines,postprocess]"
+pip install -e ".[dev,pipelines]"
 
 # Initialize pre-commit hooks (optionnal)
 pre-commit install
@@ -76,10 +73,7 @@ Launch the main application to process files interactively:
 
 The GUI handles batch processing for folders, single .h5/.hdf5 files, or .zip archives and lets you run multiple pipelines at once. Batch outputs preserve the input subfolder layout under the chosen output directory (one combined `.h5` per input file).
 
-You can also select batch-level postprocess steps. These run after the selected pipelines finish and before optional zipping, so any generated dashboards, PNGs, or summaries are included in the final output folder or archive.
-
 Use the Pipeline Library tab to select which pipelines run. Selection preferences are saved per user between app launches, including installed builds.
-Use the Postprocess Library tab the same way for postprocess steps.
 
 ```sh
 # Via the entry point
@@ -91,7 +85,7 @@ python src/eye_flow.py
 
 When you run `eyeflow` from inside the repository checkout, the launcher prefers the local `src/` tree so newly added or edited pipelines are picked up without needing a full reinstall.
 
-Installed builds expose editable `pipelines/` and `postprocess/` folders next to `EyeFlow.exe`; use the Library tabs' Open folder and Reload buttons to edit and refresh them.
+Installed builds expose an editable `pipelines/` folder next to `EyeFlow.exe`; use the Pipeline Library tab's Open folder and Reload buttons to edit and refresh it.
 
 ### CLI
 
@@ -145,54 +139,3 @@ class MyAnalysis(ProcessPipeline):
             attrs=attrs
         )
 ```
-
-## Postprocess System
-
-Postprocess steps are discovered from `src/postprocess/` in the same spirit as pipelines, but they run once per batch over the generated pipeline output folder.
-
-Use `@registerPostprocess(...)` to declare:
-
-- optional Python package dependencies with `required_deps`
-- required pipeline outputs with `required_pipelines`
-
-### Simple Postprocess Structure
-
-```python
-from postprocess.core.base import (
-    BatchPostprocess,
-    PostprocessContext,
-    PostprocessResult,
-    registerPostprocess,
-)
-
-
-@registerPostprocess(
-    name="My Batch Summary",
-    description="Aggregate metrics across the generated batch outputs.",
-    required_pipelines=["Basic Stats"],
-)
-class MyBatchSummary(BatchPostprocess):
-    def run(self, context: PostprocessContext) -> PostprocessResult:
-        report_path = context.output_dir / "my_batch_summary.json"
-        report_path.write_text("{}", encoding="utf-8")
-
-        return PostprocessResult(
-            summary="Generated my_batch_summary.json.",
-            generated_paths=[str(report_path)],
-            metadata={"file_count": len(context.processed_files)},
-        )
-```
-
-Inside a postprocess, you can:
-
-- read `context.output_dir`
-- read `context.processed_files`
-- read `context.selected_pipelines`
-- read `context.input_path`
-- read `context.zip_outputs`
-- write extra artifacts into `context.output_dir` before optional zipping
-- return a short `summary`, explicit `generated_paths`, and structured `metadata`
-
-The included `Graphics Dashboard` postprocess shows the intended pattern: it consumes the `arterial_waveform_shape_metrics` output and generates a cohort dashboard plus PNG exports after the batch finishes.
-`Pipeline Metrics Manifest` is a lighter built-in example that writes a JSON inventory of the generated pipeline metric datasets for the batch.
-`Postprocess Tutorial` is the minimal reference example: it writes a single JSON file showing every `PostprocessContext` field and the `PostprocessResult` output format.

@@ -23,13 +23,13 @@ class AppSettingsTests(unittest.TestCase):
             "os.environ",
             {
                 "APPDATA": r"C:\Users\Test\AppData\Roaming",
-                "ANGIOEYE_VERSION": "9.9.9",
+                "EYEFLOW_VERSION": "9.9.9",
             },
             clear=True,
         ):
             self.assertEqual(
                 default_settings_path(),
-                Path(r"C:\Users\Test\AppData\Roaming\AngioEye\9.9.9\settings.json"),
+                Path(r"C:\Users\Test\AppData\Roaming\EyeFlow\9.9.9\settings.json"),
             )
 
     def test_normalize_pipeline_visibility_defaults_first_run_to_visible(self) -> None:

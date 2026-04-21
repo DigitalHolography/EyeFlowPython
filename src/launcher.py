@@ -22,7 +22,7 @@ def _find_checkout_src(
 
 
 def _load_local_module(module_name: str, module_path: Path) -> Any:
-    module_alias = f"_angioeye_checkout_{module_name.replace('.', '_')}"
+    module_alias = f"_eyeflow_checkout_{module_name.replace('.', '_')}"
     spec = importlib.util.spec_from_file_location(module_alias, module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load module from {module_path}")
@@ -54,7 +54,7 @@ def _call_entry(
 
 
 def main() -> Any:
-    return _call_entry("angio_eye", "angio_eye.py", "main")
+    return _call_entry("eye_flow", "eye_flow.py", "main")
 
 
 def cli_main(argv: list[str] | None = None) -> Any:

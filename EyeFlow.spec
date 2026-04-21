@@ -8,8 +8,8 @@ datas += collect_data_files('pipelines')
 datas += collect_data_files('postprocess')
 datas += collect_data_files('sv_ttk')
 datas += collect_data_files('tkinterdnd2')
-datas += [('Angioeye_logo.png', '.')]
-datas += [('AngioEye.ico', '.')]
+datas += [('EyeFlow_logo.png', '.')]
+datas += [('EyeFlow.ico', '.')]
 datas += [('default_settings.json', '.')]
 datas += [('pyproject.toml', '.')]
 hiddenimports += collect_submodules('pipelines')
@@ -19,7 +19,7 @@ hiddenimports += ['matplotlib.backends.backend_ps']
 
 
 a = Analysis(
-    ['src\\angio_eye.py'],
+    ['src\\eye_flow.py'],
     pathex=['src'],
     binaries=[],
     datas=datas,
@@ -39,7 +39,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='AngioEye',
+    name='EyeFlow',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -52,5 +52,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='AngioEye.ico',
+    icon='EyeFlow.ico',
 )

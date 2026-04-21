@@ -89,7 +89,7 @@ class _Tooltip:
 class ProcessApp(_BaseAppTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("AngioEye")
+        self.title("EyeFlow")
         self.settings_store = AppSettingsStore()
         self._settings_warning_shown = False
         self._ensure_default_settings()
@@ -260,7 +260,7 @@ class ProcessApp(_BaseAppTk):
 
         self.minimal_title_label = ttk.Label(
             content,
-            text="AngioEye",
+            text="EyeFlow",
             font=self._get_minimal_title_font(),
         )
         self.minimal_title_label.grid(row=0, column=0, pady=(0, 10))
@@ -451,7 +451,7 @@ class ProcessApp(_BaseAppTk):
 
     def _resolve_logo_path(self) -> Path | None:
         for root in self._resource_roots():
-            candidate = root / "Angioeye_logo.png"
+            candidate = root / "EyeFlow_logo.png"
             if candidate.is_file():
                 return candidate
         return None
@@ -658,7 +658,7 @@ class ProcessApp(_BaseAppTk):
         else:
             base_name = input_path.name
         base_name = base_name or "output"
-        return f"{base_name}_angioeye"
+        return f"{base_name}_eyeflow"
 
     def _default_archive_name(self, input_path: Path) -> str:
         return f"{self._default_output_stem(input_path)}.zip"

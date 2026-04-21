@@ -1,4 +1,4 @@
-#define MyAppName "AngioEye"
+#define MyAppName "EyeFlow"
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"
@@ -27,14 +27,14 @@ LicenseFile={#PayloadDir}\LICENSE
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
-OutputBaseFilename=AngioEye-setup-{#AppVersion}
+OutputBaseFilename=EyeFlow-setup-{#AppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
-SetupIconFile={#PayloadDir}\AngioEye.ico
+SetupIconFile={#PayloadDir}\EyeFlow.ico
 UninstallDisplayName={#MyAppVersionedName}
-UninstallDisplayIcon={app}\AngioEye.exe
+UninstallDisplayIcon={app}\EyeFlow.exe
 UsePreviousAppDir=no
 UsePreviousGroup=no
 UsePreviousTasks=no
@@ -46,8 +46,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppVersionedName}"; Filename: "{app}\AngioEye.exe"
-Name: "{autodesktop}\{#MyAppVersionedName}"; Filename: "{app}\AngioEye.exe"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppVersionedName}"; Filename: "{app}\EyeFlow.exe"
+Name: "{autodesktop}\{#MyAppVersionedName}"; Filename: "{app}\EyeFlow.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\AngioEye.exe"; Description: "Launch {#MyAppVersionedName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\EyeFlow.exe"; Description: "Launch {#MyAppVersionedName}"; Flags: nowait postinstall skipifsilent

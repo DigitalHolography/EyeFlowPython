@@ -18,11 +18,11 @@ class LauncherTests(unittest.TestCase):
             nested_dir = repo_root / "sub" / "dir"
             src_dir.mkdir()
             nested_dir.mkdir(parents=True)
-            (repo_root / "pyproject.toml").write_text("[project]\nname='AngioEye'\n")
-            (src_dir / "angio_eye.py").write_text("def main():\n    return 'ok'\n")
+            (repo_root / "pyproject.toml").write_text("[project]\nname='EyeFlow'\n")
+            (src_dir / "eye_flow.py").write_text("def main():\n    return 'ok'\n")
 
             result = launcher._find_checkout_src(
-                "angio_eye.py",
+                "eye_flow.py",
                 start_dir=nested_dir,
             )
 
@@ -33,7 +33,7 @@ class LauncherTests(unittest.TestCase):
             repo_root = Path(tmp_dir)
             src_dir = repo_root / "src"
             src_dir.mkdir()
-            (repo_root / "pyproject.toml").write_text("[project]\nname='AngioEye'\n")
+            (repo_root / "pyproject.toml").write_text("[project]\nname='EyeFlow'\n")
             (src_dir / "fake_entry.py").write_text(
                 "def main(value=None):\n"
                 "    return ('checkout', value)\n",

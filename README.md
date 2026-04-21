@@ -1,6 +1,6 @@
-# AngioEye
+# EyeFlow
 
-AngioEye is the cohort-analysis engine for retinal Doppler holography. It browses EyeFlow .h5 outputs, reads per-segment metrics, applies QC, compares models, and aggregates results at eye/cohort level (including artery–vein summaries) to help design biomarkers. It exports clean CSV reports for stats, figures, and clinical models.
+EyeFlow is the cohort-analysis engine for retinal Doppler holography. It browses EyeFlow .h5 outputs, reads per-segment metrics, applies QC, compares models, and aggregates results at eye/cohort level (including artery–vein summaries) to help design biomarkers. It exports clean CSV reports for stats, figures, and clinical models.
 
 ---
 
@@ -83,15 +83,15 @@ Use the Postprocess Library tab the same way for postprocess steps.
 
 ```sh
 # Via the entry point
-angioeye
+eyeflow
 
 # Or via the script
-python src/angio_eye.py
+python src/eye_flow.py
 ```
 
-When you run `angioeye` from inside the repository checkout, the launcher prefers the local `src/` tree so newly added or edited pipelines are picked up without needing a full reinstall.
+When you run `eyeflow` from inside the repository checkout, the launcher prefers the local `src/` tree so newly added or edited pipelines are picked up without needing a full reinstall.
 
-Installed builds expose editable `pipelines/` and `postprocess/` folders next to `AngioEye.exe`; use the Library tabs' Open folder and Reload buttons to edit and refresh them.
+Installed builds expose editable `pipelines/` and `postprocess/` folders next to `EyeFlow.exe`; use the Library tabs' Open folder and Reload buttons to edit and refresh them.
 
 ### CLI
 
@@ -99,7 +99,7 @@ The CLI is designed for batch processing in headless environments or clusters.
 
 ```sh
 # Via the entry point
-angioeye-cli
+eyeflow-cli
 
 # Or via the script
 python src/cli.py
@@ -109,7 +109,7 @@ python src/cli.py
 
 ## Pipeline System
 
-Pipelines are the heart of AngioEye. To add a new analysis, create a file in `src/pipelines/` with a class inheriting from `ProcessPipeline`.
+Pipelines are the heart of EyeFlow. To add a new analysis, create a file in `src/pipelines/` with a class inheriting from `ProcessPipeline`.
 
 To register it to the app, add the decorator `@register_pipeline`. You can define any needed imports inside, as well as some more info.
 

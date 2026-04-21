@@ -2,7 +2,7 @@
 """
 Generate an optional requirements file by aggregating REQUIRES lists from all pipeline modules.
 
-Output: AngioEye/pipelines/requirements-optional.txt
+Output: EyeFlow/pipelines/requirements-optional.txt
 Usage:   python scripts/gen_optional_reqs.py
 """
 
@@ -12,7 +12,7 @@ import ast
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PIPELINES_DIR = PROJECT_ROOT / "AngioEye" / "pipelines"
+PIPELINES_DIR = PROJECT_ROOT / "EyeFlow" / "pipelines"
 OUTPUT_PATH = PIPELINES_DIR / "requirements-optional.txt"
 
 

@@ -9,11 +9,11 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SPEC_FILE = PROJECT_ROOT / "AngioEye.spec"
-ISS_FILE = PROJECT_ROOT / "installer" / "AngioEye.iss"
+SPEC_FILE = PROJECT_ROOT / "EyeFlow.spec"
+ISS_FILE = PROJECT_ROOT / "installer" / "EyeFlow.iss"
 DIST_DIR = PROJECT_ROOT / "dist"
-ONEDIR_BUILD = DIST_DIR / "AngioEye"
-ONEFILE_BUILD = DIST_DIR / "AngioEye.exe"
+ONEDIR_BUILD = DIST_DIR / "EyeFlow"
+ONEFILE_BUILD = DIST_DIR / "EyeFlow.exe"
 PAYLOAD_DIR = PROJECT_ROOT / "build" / "installer_payload"
 INSTALLER_OUTPUT_DIR = DIST_DIR
 VERSION_PATTERN = re.compile(r'^version\s*=\s*"([^"]+)"\s*$')
@@ -26,7 +26,7 @@ PAYLOAD_EXTRA_FILES = (
     PROJECT_ROOT / "LICENSE",
     PROJECT_ROOT / "THIRD_PARTY_NOTICES",
     PROJECT_ROOT / "README.md",
-    PROJECT_ROOT / "AngioEye.ico",
+    PROJECT_ROOT / "EyeFlow.ico",
     PROJECT_ROOT / "default_settings.json",
     PROJECT_ROOT / "pyproject.toml",
 )
@@ -35,7 +35,7 @@ EDITABLE_PACKAGE_DIRS = ("pipelines", "postprocess")
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build the AngioEye Windows installer with PyInstaller and Inno Setup."
+        description="Build the EyeFlow Windows installer with PyInstaller and Inno Setup."
     )
     parser.add_argument(
         "--skip-pyinstaller",
@@ -140,7 +140,7 @@ def _prepare_payload() -> None:
     PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     build_targets: list[Path] = []
-    onedir_exe = ONEDIR_BUILD / "AngioEye.exe"
+    onedir_exe = ONEDIR_BUILD / "EyeFlow.exe"
     if onedir_exe.is_file():
         build_targets.append(onedir_exe)
     if ONEFILE_BUILD.is_file():
@@ -154,7 +154,7 @@ def _prepare_payload() -> None:
 
     selected_target = max(build_targets, key=lambda path: path.stat().st_mtime)
     if selected_target == ONEFILE_BUILD:
-        shutil.copy2(selected_target, PAYLOAD_DIR / "AngioEye.exe")
+        shutil.copy2(selected_target, PAYLOAD_DIR / "EyeFlow.exe")
     else:
         _copy_tree_contents(ONEDIR_BUILD, PAYLOAD_DIR)
 
@@ -197,7 +197,7 @@ def main() -> None:
     _prepare_payload()
     _run_inno_setup(iscc_path, app_version)
 
-    installer_name = INSTALLER_OUTPUT_DIR / f"AngioEye-setup-{app_version}.exe"
+    installer_name = INSTALLER_OUTPUT_DIR / f"EyeFlow-setup-{app_version}.exe"
     print(f"Installer created at {installer_name}")
 
 

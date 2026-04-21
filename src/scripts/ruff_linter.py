@@ -33,7 +33,7 @@ def run_ruff(fix=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AngioEye Linting Tool")
+    parser = argparse.ArgumentParser(description="EyeFlow Linting Tool")
     parser.add_argument("--fix", action="store_true", help="Automatically fix issues")
     args = parser.parse_args()
     run_ruff(fix=args.fix)

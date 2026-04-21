@@ -18,7 +18,7 @@ from .core.base import (
 
 def _extend_with_external_postprocess_dir() -> None:
     candidates: list[Path] = []
-    env_path = os.getenv("ANGIOEYE_POSTPROCESS_DIR")
+    env_path = os.getenv("EYEFLOW_POSTPROCESS_DIR")
     if env_path:
         candidates.append(Path(env_path))
     if getattr(sys, "frozen", False):

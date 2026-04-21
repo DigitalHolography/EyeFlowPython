@@ -1,5 +1,5 @@
 """
-Command-line interface to run AngioEye pipelines over a collection of HDF5 files.
+Command-line interface to run EyeFlow pipelines over a collection of HDF5 files.
 
 Usage example:
     python cli.py --data data/ --pipelines pipelines.txt --postprocess postprocess.txt --output ./results --zip --zip-name my_run.zip
@@ -359,7 +359,7 @@ def run_cli(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run AngioEye pipelines over a folder of HDF5 files."
+        description="Run EyeFlow pipelines over a folder of HDF5 files."
     )
     parser.add_argument(
         "-d",

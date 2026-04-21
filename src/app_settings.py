@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-APP_NAME = "AngioEye"
+APP_NAME = "EyeFlow"
 SETTINGS_FILENAME = "settings.json"
 DEFAULT_SETTINGS_FILENAME = "default_settings.json"
 LAST_BATCH_LOG_FILENAME = "last_batch_log.txt"
@@ -31,7 +31,7 @@ def _read_version_from_pyproject(pyproject_path: Path) -> str | None:
 
 
 def app_version() -> str | None:
-    env_version = os.getenv("ANGIOEYE_VERSION", "").strip()
+    env_version = os.getenv("EYEFLOW_VERSION", "").strip()
     if env_version:
         return env_version
 
@@ -83,7 +83,7 @@ def _resource_roots() -> list[Path]:
 
 
 def default_settings_template_path() -> Path | None:
-    env_path = os.getenv("ANGIOEYE_DEFAULT_SETTINGS")
+    env_path = os.getenv("EYEFLOW_DEFAULT_SETTINGS")
     if env_path:
         candidate = Path(env_path).expanduser()
         if candidate.is_file():

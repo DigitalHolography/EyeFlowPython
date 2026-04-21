@@ -6,7 +6,7 @@ Minimal Python project scaffold managed with `uv`.
 
 ```powershell
 uv sync
-uv run python -m eyeflowpython
+uv run eyeflowpython Context_Files\example.h5
 ```
 
 ## Common Commands
@@ -14,6 +14,9 @@ uv run python -m eyeflowpython
 ```powershell
 uv add <package>
 uv add --dev pytest ruff
-uv run eyeflowpython
+uv run eyeflowpython Context_Files\example.h5
+uv run eyeflowpython Context_Files\folder_with_h5
+uv run eyeflowpython Context_Files\archive.zip
+uv run eyeflowpython-ui
 uv lock
 ```

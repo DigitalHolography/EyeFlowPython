@@ -117,6 +117,45 @@ class _MergedAttrs(Mapping[str, object]):
         return default
 
 
+class _EyeFlowView:
+    def __init__(self, work_h5: h5py.File) -> None:
+        self.work_h5 = work_h5
+
+    def _pipeline_group_names(self) -> list[str]:
+        eye_flow_group = self.work_h5.get("EyeFlow")
+        if not isinstance(eye_flow_group, h5py.Group):
+            return []
+        return list(eye_flow_group.keys())
+
+    def get(self, key: str, default=None):
+        normalized_key = _normalize_h5_lookup_path(key)
+        if not normalized_key:
+            return default
+
+        explicit = self.work_h5.get(f"EyeFlow/{normalized_key}")
+        if explicit is not None:
+            return explicit
+
+        for pipeline_group_name in reversed(self._pipeline_group_names()):
+            candidate = self.work_h5.get(
+                f"EyeFlow/{pipeline_group_name}/{normalized_key}"
+            )
+            if candidate is not None:
+                return candidate
+        return default
+
+    def __getitem__(self, key: str):
+        found = self.get(key)
+        if found is None:
+            raise KeyError(key)
+        return found
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, str):
+            return False
+        return self.get(key) is not None
+
+
 class _PipelineInputView:
     def __init__(
         self,
@@ -132,6 +171,7 @@ class _PipelineInputView:
         self.work = work_h5
         self.hd = holodoppler_h5
         self.dv = doppler_vision_h5
+        self.ef = _EyeFlowView(work_h5)
         self.preferred_input = preferred_input
         self.attrs = _MergedAttrs(
             self.work_h5,

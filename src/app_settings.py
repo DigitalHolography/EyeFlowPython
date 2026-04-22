@@ -137,6 +137,36 @@ def normalize_pipeline_visibility(
     return normalize_named_visibility(pipeline_names, stored_visibility)
 
 
+def normalize_named_order(
+    item_names: Iterable[str], stored_order: Iterable[str] | None
+) -> tuple[list[str], bool]:
+    ordered_names = list(dict.fromkeys(item_names))
+    clean_stored = [
+        name for name in (stored_order or []) if isinstance(name, str) and name.strip()
+    ]
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for name in clean_stored:
+        if name in ordered_names and name not in seen:
+            normalized.append(name)
+            seen.add(name)
+
+    for name in ordered_names:
+        if name not in seen:
+            normalized.append(name)
+            seen.add(name)
+
+    changed = normalized != clean_stored
+    return normalized, changed
+
+
+def normalize_pipeline_order(
+    pipeline_names: Iterable[str], stored_order: Iterable[str] | None
+) -> tuple[list[str], bool]:
+    return normalize_named_order(pipeline_names, stored_order)
+
+
 class AppSettingsStore:
     def __init__(
         self,
@@ -200,6 +230,23 @@ class AppSettingsStore:
 
     def save_pipeline_visibility(self, visibility: Mapping[str, bool]) -> None:
         self.save_named_visibility("pipeline_visibility", visibility)
+
+    def load_named_order(self, key: str) -> list[str]:
+        raw_order = self.load().get(key, [])
+        if not isinstance(raw_order, list):
+            return []
+        return [name for name in raw_order if isinstance(name, str) and name.strip()]
+
+    def save_named_order(self, key: str, order: Iterable[str]) -> None:
+        settings = self.load()
+        settings[key] = [name for name in order if isinstance(name, str) and name]
+        self.save(settings)
+
+    def load_pipeline_order(self) -> list[str]:
+        return self.load_named_order("pipeline_order")
+
+    def save_pipeline_order(self, order: Iterable[str]) -> None:
+        self.save_named_order("pipeline_order", order)
 
     def load_ui_mode(self) -> str:
         mode = self.load().get("ui_mode")

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import csv
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,6 +63,7 @@ class PipelineDescriptor:
     name: str
     description: str
     available: bool
+    input_slot: str = "both"
     # To avoid Python Mutable Default Arguments
     requires: list[str] = field(default_factory=list)
     missing_deps: list[str] = field(default_factory=list)
@@ -85,6 +88,7 @@ class ProcessPipeline:
     available: bool
     missing_deps: list[str]
     requires: list[str]
+    input_slot: str = "both"
 
     def __init__(self) -> None:
         # Derive the pipeline name from the module filename (e.g., basic_stats.py -> basic_stats).

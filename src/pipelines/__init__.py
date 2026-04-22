@@ -66,6 +66,7 @@ def _discover_pipelines() -> tuple[list[PipelineDescriptor], list[PipelineDescri
             name=cls.name,
             description=cls.description,
             available=cls.available,
+            input_slot=getattr(cls, "input_slot", "both"),
             requires=cls.requires,
             missing_deps=cls.missing_deps,
             pipeline_cls=cls,

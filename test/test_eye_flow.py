@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import tempfile
 import types
@@ -26,7 +28,8 @@ fake_pipeline_errors.format_pipeline_exception = lambda exc, _pipeline: str(exc)
 sys.modules.setdefault("pipelines.core.errors", fake_pipeline_errors)
 
 fake_pipeline_utils = types.ModuleType("pipelines.core.utils")
-fake_pipeline_utils.write_combined_results_h5 = lambda *args, **kwargs: None
+fake_pipeline_utils.append_result_group = lambda *args, **kwargs: None
+fake_pipeline_utils.initialize_output_h5 = lambda *args, **kwargs: None
 sys.modules.setdefault("pipelines.core.utils", fake_pipeline_utils)
 
 from eye_flow import ProcessApp  # noqa: E402
@@ -54,71 +57,68 @@ class _Var:
         self._value = value
 
 
-class BatchZipCleanupTests(unittest.TestCase):
+class BatchRunTests(unittest.TestCase):
     def _make_fake_app(
         self,
         *,
-        input_path: Path,
+        hd_path: Path | None,
+        dv_path: Path | None,
         base_output_dir: Path,
         zip_should_fail: bool,
     ):
         logs: list[str] = []
-        data_root = input_path.parent / "extracted"
-        h5_path = data_root / "sample.h5"
 
-        def _run_pipelines_on_file(
-            _h5_path,
-            _pipelines,
-            output_dir,
-            output_relative_parent=Path("."),
-            output_filename=None,
+        def _run_pipelines_to_output(
+            *,
+            output_h5_path,
+            pipelines,
+            holodoppler_h5,
+            doppler_vision_h5,
         ):
-            target_dir = output_dir / output_relative_parent
-            target_dir.mkdir(parents=True, exist_ok=True)
-            result_path = target_dir / (output_filename or "sample_pipelines_result.h5")
-            result_path.write_text("result", encoding="utf-8")
-            return result_path
+            output_h5_path.parent.mkdir(parents=True, exist_ok=True)
+            output_h5_path.write_text("result", encoding="utf-8")
+            return output_h5_path
 
-        def _zip_output_dir(_folder, target_path=None, progress_callback=None):
+        def _zip_output_dir(folder, target_path=None, progress_callback=None):
             if zip_should_fail:
                 raise RuntimeError("zip failed")
             if progress_callback is not None:
-                progress_callback(1, 1, Path("sample_pipelines_result.h5"))
+                progress_callback(1, 1, Path("subject_eyeflow.h5"))
             assert target_path is not None
             target_path.write_text("archive", encoding="utf-8")
             return target_path
 
-        return SimpleNamespace(
-            batch_input_var=_Var(str(input_path)),
+        pipeline = SimpleNamespace(name="Demo", available=True, input_slot="both")
+        app = SimpleNamespace(
             batch_output_var=_Var(str(base_output_dir)),
             batch_zip_var=_Var(True),
             batch_zip_name_var=_Var("outputs.zip"),
-            ui_mode="advanced",
-            _progress_total_units=1.0,
-            _progress_completed_units=0.0,
             _progress_primary_style="MinimalPrimary.Horizontal.TProgressbar",
             _progress_final_style="MinimalFinal.Horizontal.TProgressbar",
-            pipeline_rows=[SimpleNamespace(name="Demo", available=True)],
+            _progress_total_units=1.0,
+            pipeline_rows=[pipeline],
             pipeline_visibility={"Demo": True},
-            pipeline_registry={"Demo": object()},
+            pipeline_registry={"Demo": pipeline},
+            _selected_input_paths=lambda: (hd_path, dv_path),
+            _validate_selected_inputs=lambda *_args: True,
             _reset_batch_output=lambda *args, **kwargs: None,
-            _prepare_data_root=lambda _path: (data_root, None),
-            _find_h5_inputs=lambda _path: [h5_path],
-            _relative_input_parent=lambda *args, **kwargs: Path("."),
-            _run_pipelines_on_file=_run_pipelines_on_file,
-            _zip_output_dir=_zip_output_dir,
             _log_batch=logs.append,
-            _show_batch_error_dialog=lambda *args, **kwargs: None,
+            _start_progress=lambda total_units, **kwargs: setattr(
+                app, "_progress_total_units", total_units
+            ),
+            _set_progress_units=lambda *args, **kwargs: None,
+            _set_minimal_status=lambda *args, **kwargs: None,
             _reset_progress=lambda: None,
-            _start_progress=lambda *args, **kwargs: None,
-            _set_progress_units=lambda completed_units: None,
             _advance_progress=lambda units=1.0: None,
-            _minimal_output_filename_for_run=lambda _data_path, _inputs: None,
-            _set_minimal_status=lambda _text: None,
+            _minimal_output_filename_for_run=lambda: None,
+            _default_work_h5_name=lambda: "subject_eyeflow.h5",
+            _next_available_output_path=lambda path: path,
+            _run_pipelines_to_output=_run_pipelines_to_output,
+            _zip_output_dir=_zip_output_dir,
             update=lambda: None,
             logs=logs,
         )
-
+        return app
     @mock.patch("eye_flow.messagebox.showwarning")
     @mock.patch("eye_flow.messagebox.showerror")
     def test_run_batch_removes_temp_output_dir_after_successful_zip(
@@ -128,13 +128,14 @@ class BatchZipCleanupTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "input.zip"
-            input_path.write_text("dummy", encoding="utf-8")
+            hd_path = tmp_path / "subject_holodoppler.h5"
+            hd_path.write_text("dummy", encoding="utf-8")
             base_output_dir = tmp_path / "outputs"
             base_output_dir.mkdir()
 
             app = self._make_fake_app(
-                input_path=input_path,
+                hd_path=hd_path,
+                dv_path=None,
                 base_output_dir=base_output_dir,
                 zip_should_fail=False,
             )
@@ -159,13 +160,14 @@ class BatchZipCleanupTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "input.zip"
-            input_path.write_text("dummy", encoding="utf-8")
+            hd_path = tmp_path / "subject_holodoppler.h5"
+            hd_path.write_text("dummy", encoding="utf-8")
             base_output_dir = tmp_path / "outputs"
             base_output_dir.mkdir()
 
             app = self._make_fake_app(
-                input_path=input_path,
+                hd_path=hd_path,
+                dv_path=None,
                 base_output_dir=base_output_dir,
                 zip_should_fail=True,
             )
@@ -174,75 +176,153 @@ class BatchZipCleanupTests(unittest.TestCase):
 
             work_dirs = [path for path in base_output_dir.iterdir() if path.is_dir()]
             self.assertEqual(1, len(work_dirs))
-            self.assertTrue(
-                (work_dirs[0] / "sample_pipelines_result.h5").exists(),
-            )
+            self.assertTrue((work_dirs[0] / "subject_eyeflow.h5").exists())
             self.assertFalse((base_output_dir / "outputs.zip").exists())
-            self.assertTrue(
-                any(str(work_dirs[0]) in line for line in app.logs),
-            )
+            self.assertTrue(any(str(work_dirs[0]) in line for line in app.logs))
             self.assertEqual("Zip failed", showerror.call_args.args[0])
 
-    def test_apply_input_defaults_for_zip_input(self) -> None:
+
+class InputHandlingTests(unittest.TestCase):
+    def _make_bare_app(self):
+        app = ProcessApp.__new__(ProcessApp)
+        app.batch_hd_input_var = _Var("")
+        app.batch_dv_input_var = _Var("")
+        app.batch_output_var = _Var("")
+        app.batch_zip_var = _Var(False)
+        app.batch_zip_name_var = _Var("outputs.zip")
+        app._reset_progress = lambda: None
+        app._set_minimal_status = lambda _text: None
+        logs: list[str] = []
+        app._log_batch = logs.append
+        return app, logs
+
+    def test_handle_dropped_paths_assigns_hd_and_dv_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            input_path = tmp_path / "sample.zip"
-            input_path.write_text("dummy", encoding="utf-8")
+            hd_path = tmp_path / "subject_holodoppler.h5"
+            dv_path = tmp_path / "subject_doppler_vision.h5"
+            hd_path.write_text("dummy", encoding="utf-8")
+            dv_path.write_text("dummy", encoding="utf-8")
 
-            app = SimpleNamespace(
-                batch_output_var=_Var(""),
-                batch_zip_var=_Var(False),
-                batch_zip_name_var=_Var("outputs.zip"),
-                _default_output_stem=lambda input_path: f"{input_path.stem}_eyeflow",
-                _default_archive_name=lambda input_path: f"{input_path.stem}_eyeflow.zip",
-                _reset_progress=lambda: None,
-                _set_minimal_status=lambda _text: None,
-            )
+            app, logs = self._make_bare_app()
 
-            ProcessApp._apply_input_defaults(app, input_path)
-
-            self.assertEqual(str(tmp_path), app.batch_output_var.get())
-            self.assertTrue(app.batch_zip_var.get())
-            self.assertEqual("sample_eyeflow.zip", app.batch_zip_name_var.get())
-
-    def test_minimal_output_filename_for_single_h5(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            input_path = Path(tmp_dir) / "sample.h5"
-            input_path.write_text("dummy", encoding="utf-8")
-
-            app = SimpleNamespace(
-                ui_mode="minimal",
-                batch_zip_var=_Var(False),
-                _default_output_artifact_name=lambda path: f"{path.stem}_eyeflow.h5",
-            )
-
-            output_name = ProcessApp._minimal_output_filename_for_run(
-                app,
-                input_path,
-                [input_path],
-            )
-
-            self.assertEqual("sample_eyeflow.h5", output_name)
-
-    def test_handle_dropped_paths_accepts_supported_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            input_path = Path(tmp_dir) / "sample.zip"
-            input_path.write_text("dummy", encoding="utf-8")
-            applied_paths: list[Path] = []
-            logs: list[str] = []
-
-            app = SimpleNamespace(
-                batch_input_var=_Var(""),
-                _apply_input_defaults=lambda path: applied_paths.append(path),
-                _log_batch=logs.append,
-            )
-
-            accepted = ProcessApp._handle_dropped_paths(app, [input_path])
+            accepted = ProcessApp._handle_dropped_paths(app, [hd_path, dv_path])
 
             self.assertTrue(accepted)
-            self.assertEqual(str(input_path), app.batch_input_var.get())
-            self.assertEqual([input_path], applied_paths)
-            self.assertIn("Drag and drop", logs[0])
+            self.assertEqual(str(hd_path), app.batch_hd_input_var.get())
+            self.assertEqual(str(dv_path), app.batch_dv_input_var.get())
+            self.assertEqual(str(tmp_path), app.batch_output_var.get())
+            self.assertEqual("subject_eyeflow.zip", app.batch_zip_name_var.get())
+            self.assertEqual(2, len(logs))
+            self.assertIn("Drag and drop HD", logs[0])
+            self.assertIn("Drag and drop DV", logs[1])
+
+    @mock.patch("eye_flow.messagebox.showwarning")
+    def test_validate_selected_inputs_requires_both_files(
+        self,
+        showwarning,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            hd_path = Path(tmp_dir) / "subject_holodoppler.h5"
+            hd_path.write_text("dummy", encoding="utf-8")
+            app = ProcessApp.__new__(ProcessApp)
+
+            is_valid = ProcessApp._validate_selected_inputs(
+                app,
+                hd_path,
+                None,
+                [SimpleNamespace(name="Demo")],
+            )
+
+            self.assertFalse(is_valid)
+            self.assertEqual("Missing input", showwarning.call_args.args[0])
+
+    def test_minimal_output_filename_uses_current_inputs(self) -> None:
+        app = ProcessApp.__new__(ProcessApp)
+        app.ui_mode = "minimal"
+        app.batch_zip_var = _Var(False)
+        app._default_work_h5_name = lambda: "subject_eyeflow.h5"
+
+        output_name = ProcessApp._minimal_output_filename_for_run(app)
+
+        self.assertEqual("subject_eyeflow.h5", output_name)
+
+
+class PipelineOrderTests(unittest.TestCase):
+    def test_move_pipeline_to_index_updates_order_and_refreshes_library(self) -> None:
+        app = ProcessApp.__new__(ProcessApp)
+        app.pipeline_rows = [
+            SimpleNamespace(name="A"),
+            SimpleNamespace(name="B"),
+            SimpleNamespace(name="C"),
+        ]
+        app._persist_pipeline_order = mock.Mock()
+        app._populate_pipeline_library = mock.Mock()
+        app._pipeline_index = lambda name: next(
+            (idx for idx, row in enumerate(app.pipeline_rows) if row.name == name),
+            None,
+        )
+
+        moved = ProcessApp._move_pipeline_to_index(app, "B", 0)
+
+        self.assertTrue(moved)
+        self.assertEqual(["B", "A", "C"], [row.name for row in app.pipeline_rows])
+        app._persist_pipeline_order.assert_called_once_with()
+        app._populate_pipeline_library.assert_called_once_with(app.pipeline_rows)
+
+    def test_move_pipeline_to_index_supports_downward_insert_position(self) -> None:
+        app = ProcessApp.__new__(ProcessApp)
+        app.pipeline_rows = [
+            SimpleNamespace(name="A"),
+            SimpleNamespace(name="B"),
+            SimpleNamespace(name="C"),
+            SimpleNamespace(name="D"),
+        ]
+        app._persist_pipeline_order = mock.Mock()
+        app._populate_pipeline_library = mock.Mock()
+
+        moved = ProcessApp._move_pipeline_to_index(app, "B", 3)
+
+        self.assertTrue(moved)
+        self.assertEqual(["A", "C", "B", "D"], [row.name for row in app.pipeline_rows])
+        app._persist_pipeline_order.assert_called_once_with()
+        app._populate_pipeline_library.assert_called_once_with(app.pipeline_rows)
+
+    def test_set_pipeline_visibility_moves_enabled_pipeline_to_top(self) -> None:
+        app = ProcessApp.__new__(ProcessApp)
+        pipeline = SimpleNamespace(name="B", available=True)
+        app.pipeline_catalog = {"B": pipeline}
+        app.pipeline_visibility = {"A": True, "B": False, "C": False}
+        app._persist_pipeline_visibility = mock.Mock()
+        app._move_pipeline_to_top = mock.Mock(return_value=True)
+        app._update_pipeline_library_summary = mock.Mock()
+
+        ProcessApp._set_pipeline_visibility(app, "B", True)
+
+        self.assertTrue(app.pipeline_visibility["B"])
+        app._persist_pipeline_visibility.assert_called_once_with()
+        app._move_pipeline_to_top.assert_called_once_with("B")
+        app._update_pipeline_library_summary.assert_not_called()
+
+    def test_finish_pipeline_drag_reorders_to_drop_index(self) -> None:
+        app = ProcessApp.__new__(ProcessApp)
+        app._dragging_pipeline_name = "C"
+        app._dragging_pipeline_active = True
+        app._pipeline_drop_index = mock.Mock(return_value=0)
+        app._move_pipeline_to_index = mock.Mock()
+        app._hide_pipeline_drop_indicator = mock.Mock()
+        widget = mock.Mock()
+
+        result = ProcessApp._finish_pipeline_drag(
+            app,
+            SimpleNamespace(widget=widget, y_root=120),
+        )
+
+        widget.grab_release.assert_called_once_with()
+        app._hide_pipeline_drop_indicator.assert_called_once_with()
+        app._pipeline_drop_index.assert_called_once_with(120)
+        app._move_pipeline_to_index.assert_called_once_with("C", 0)
+        self.assertEqual("break", result)
 
 
 class MouseWheelBindingTests(unittest.TestCase):

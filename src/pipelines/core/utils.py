@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -137,6 +139,40 @@ def _set_attr_safe(h5obj: h5py.File | h5py.Group, key: str, value) -> None:
         h5obj.attrs[key] = str(value)
 
 
+def initialize_output_h5(
+    h5file: h5py.File,
+    *,
+    holodoppler_source_file: str | None = None,
+    doppler_vision_source_file: str | None = None,
+) -> None:
+    if holodoppler_source_file:
+        h5file.attrs["holodoppler_source_file"] = holodoppler_source_file
+    if doppler_vision_source_file:
+        h5file.attrs["doppler_vision_source_file"] = doppler_vision_source_file
+    primary_source = holodoppler_source_file or doppler_vision_source_file
+    if primary_source:
+        h5file.attrs["source_file"] = primary_source
+
+
+def append_result_group(
+    h5file: h5py.File,
+    pipeline_name: str,
+    result: ProcessResult,
+) -> h5py.Group:
+    pipelines_grp = _ensure_pipelines_group(h5file)
+    pipeline_grp = _create_unique_group(pipelines_grp, safe_h5_key(pipeline_name))
+    pipeline_grp.attrs["pipeline"] = pipeline_name
+    if result.attrs:
+        for key, value in result.attrs.items():
+            if key == "pipeline":
+                continue
+            _set_attr_safe(pipeline_grp, key, value)
+    for key, value in result.metrics.items():
+        _write_value_dataset(pipeline_grp, key, value)
+    h5file.flush()
+    return pipeline_grp
+
+
 def write_result_h5(
     result: ProcessResult,
     path: Path | str,
@@ -160,16 +196,7 @@ def write_result_h5(
             f.attrs["pipeline"] = pipeline_name
         if source_file:
             f.attrs["source_file"] = source_file
-        pipelines_grp = _ensure_pipelines_group(f)
-        pipeline_grp = _create_unique_group(pipelines_grp, safe_h5_key(pipeline_name))
-        pipeline_grp.attrs["pipeline"] = pipeline_name
-        if result.attrs:
-            for key, value in result.attrs.items():
-                if key == "pipeline":
-                    continue
-                _set_attr_safe(pipeline_grp, key, value)
-        for key, value in result.metrics.items():
-            _write_value_dataset(pipeline_grp, key, value)
+        append_result_group(f, pipeline_name, result)
     return str(out_path)
 
 
@@ -191,17 +218,6 @@ def write_combined_results_h5(
             _copy_input_contents(source_file, f)
         if source_file:
             f.attrs["source_file"] = source_file
-        pipelines_grp = _ensure_pipelines_group(f)
         for pipeline_name, result in results:
-            pipeline_grp = _create_unique_group(
-                pipelines_grp, safe_h5_key(pipeline_name)
-            )
-            pipeline_grp.attrs["pipeline"] = pipeline_name
-            if result.attrs:
-                for key, value in result.attrs.items():
-                    if key == "pipeline":
-                        continue
-                    _set_attr_safe(pipeline_grp, key, value)
-            for key, value in result.metrics.items():
-                _write_value_dataset(pipeline_grp, key, value)
+            append_result_group(f, pipeline_name, result)
     return str(out_path)

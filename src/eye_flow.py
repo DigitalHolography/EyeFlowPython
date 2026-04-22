@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -17,6 +20,7 @@ import h5py
 from app_settings import (
     LAST_BATCH_LOG_FILENAME,
     AppSettingsStore,
+    normalize_pipeline_order,
     normalize_pipeline_visibility,
 )
 
@@ -31,9 +35,9 @@ try:
 except ImportError:  #  optional dependency
     sv_ttk = None
 
-from pipelines import PipelineDescriptor, ProcessResult, load_pipeline_catalog
+from pipelines import PipelineDescriptor, load_pipeline_catalog
 from pipelines.core.errors import format_pipeline_exception
-from pipelines.core.utils import write_combined_results_h5
+from pipelines.core.utils import append_result_group, initialize_output_h5
 
 _BaseAppTk = TkinterDnD.Tk if TkinterDnD is not None else tk.Tk
 
@@ -80,6 +84,128 @@ class _Tooltip:
             self.tipwindow = None
 
 
+def _normalize_h5_lookup_path(path: str) -> str:
+    return str(path).replace("\\", "/").strip("/")
+
+
+class _MergedAttrs(Mapping[str, object]):
+    def __init__(self, *sources: h5py.File | None) -> None:
+        self._sources = [source for source in sources if source is not None]
+
+    def __getitem__(self, key: str) -> object:
+        sentinel = object()
+        value = self.get(key, sentinel)
+        if value is sentinel:
+            raise KeyError(key)
+        return value
+
+    def __iter__(self) -> Iterator[str]:
+        seen: set[str] = set()
+        for source in self._sources:
+            for key in source.attrs.keys():
+                if key not in seen:
+                    seen.add(key)
+                    yield str(key)
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self.__iter__())
+
+    def get(self, key: str, default=None):
+        for source in self._sources:
+            if key in source.attrs:
+                return source.attrs[key]
+        return default
+
+
+class _PipelineInputView:
+    def __init__(
+        self,
+        *,
+        work_h5: h5py.File,
+        holodoppler_h5: h5py.File | None = None,
+        doppler_vision_h5: h5py.File | None = None,
+        preferred_input: str = "both",
+    ) -> None:
+        self.work_h5 = work_h5
+        self.hd_h5 = holodoppler_h5
+        self.dv_h5 = doppler_vision_h5
+        self.work = work_h5
+        self.hd = holodoppler_h5
+        self.dv = doppler_vision_h5
+        self.preferred_input = preferred_input
+        self.attrs = _MergedAttrs(
+            self.work_h5,
+            self._preferred_raw_source(),
+            self._secondary_raw_source(),
+        )
+
+    def _preferred_raw_source(self) -> h5py.File | None:
+        if self.preferred_input == "dv":
+            return self.dv_h5 or self.hd_h5
+        return self.hd_h5 or self.dv_h5
+
+    def _secondary_raw_source(self) -> h5py.File | None:
+        preferred = self._preferred_raw_source()
+        if preferred is self.hd_h5:
+            return self.dv_h5
+        if preferred is self.dv_h5:
+            return self.hd_h5
+        return None
+
+    @property
+    def filename(self) -> str:
+        primary = self._preferred_raw_source()
+        if primary is not None and primary.filename is not None:
+            return str(primary.filename)
+        if self.work_h5.filename is not None:
+            return str(self.work_h5.filename)
+        return ""
+
+    def _lookup_in_source(self, source: h5py.File | None, key: str):
+        if source is None:
+            return None
+
+        direct = source.get(key)
+        if direct is not None:
+            return direct
+
+        eye_flow_group = source.get("EyeFlow")
+        if not isinstance(eye_flow_group, h5py.Group):
+            return None
+
+        for pipeline_group_name in reversed(list(eye_flow_group.keys())):
+            candidate = source.get(f"EyeFlow/{pipeline_group_name}/{key}")
+            if candidate is not None:
+                return candidate
+        return None
+
+    def get(self, key: str, default=None):
+        normalized_key = _normalize_h5_lookup_path(key)
+        if not normalized_key:
+            return default
+
+        for source in (
+            self.work_h5,
+            self._preferred_raw_source(),
+            self._secondary_raw_source(),
+        ):
+            found = self._lookup_in_source(source, normalized_key)
+            if found is not None:
+                return found
+        return default
+
+    def __getitem__(self, key: str):
+        found = self.get(key)
+        if found is None:
+            raise KeyError(key)
+        return found
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, str):
+            return False
+        return self.get(key) is not None
+
+
 class ProcessApp(_BaseAppTk):
     def __init__(self) -> None:
         super().__init__()
@@ -93,14 +219,21 @@ class ProcessApp(_BaseAppTk):
         self.pipeline_rows: list[PipelineDescriptor] = []
         self.pipeline_visibility: dict[str, bool] = {}
         self.pipeline_visibility_vars: dict[str, tk.BooleanVar] = {}
-        self.batch_input_var = tk.StringVar()
+        self.pipeline_row_widgets: dict[str, tk.Widget] = {}
+        self._dragging_pipeline_name: str | None = None
+        self._dragging_pipeline_active = False
+        self._drag_start_root_y = 0
+        self._pipeline_drop_indicator: tk.Frame | None = None
+        self.batch_hd_input_var = tk.StringVar()
+        self.batch_dv_input_var = tk.StringVar()
         self.batch_output_var = tk.StringVar(value=str(Path.cwd()))
         self.batch_zip_var = tk.BooleanVar(value=False)
         self.batch_zip_name_var = tk.StringVar(value="outputs.zip")
         self.batch_progress_var = tk.DoubleVar(value=0.0)
         self.minimal_status_var = tk.StringVar(value="Ready.")
         self.pipeline_library_summary_var = tk.StringVar(value="")
-        self.minimal_input_path_var = tk.StringVar(value="No input selected")
+        self.minimal_hd_input_path_var = tk.StringVar(value="No HD input selected")
+        self.minimal_dv_input_path_var = tk.StringVar(value="No DV input selected")
         self.minimal_output_path_var = tk.StringVar(value=str(Path.cwd()))
         self.minimal_output_name_var = tk.StringVar(value="Output name: -")
         self._progress_total_units = 1.0
@@ -120,7 +253,8 @@ class ProcessApp(_BaseAppTk):
         self._set_window_icon()
         self._build_ui()
         self._install_drop_targets()
-        self.batch_input_var.trace_add("write", self._on_batch_paths_changed)
+        self.batch_hd_input_var.trace_add("write", self._on_batch_paths_changed)
+        self.batch_dv_input_var.trace_add("write", self._on_batch_paths_changed)
         self.batch_output_var.trace_add("write", self._on_batch_paths_changed)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._register_pipelines()
@@ -258,28 +392,54 @@ class ProcessApp(_BaseAppTk):
             self.minimal_logo_label = ttk.Label(content, image=self._minimal_logo_image)
             self.minimal_logo_label.grid(row=1, column=0, pady=(0, 18))
 
-        self.minimal_browse_button = ttk.Button(
+        self.minimal_hd_browse_button = ttk.Button(
             content,
-            text="Browse .h5 or zip archive",
-            command=self.choose_batch_file,
+            text="Select HD .h5",
+            command=self.choose_hd_file,
         )
-        self.minimal_browse_button.grid(row=2, column=0, pady=(0, 10))
-        self.minimal_input_path_label = tk.Label(
+        self.minimal_hd_browse_button.grid(row=2, column=0, pady=(0, 10))
+        self.minimal_hd_input_path_label = tk.Label(
             content,
-            textvariable=self.minimal_input_path_var,
+            textvariable=self.minimal_hd_input_path_var,
             bg=self._bg_color,
             fg=self._muted_fg,
             justify="center",
             wraplength=420,
         )
-        self.minimal_input_path_label.grid(row=3, column=0, pady=(0, 18), sticky="ew")
+        self.minimal_hd_input_path_label.grid(
+            row=3,
+            column=0,
+            pady=(0, 18),
+            sticky="ew",
+        )
+
+        self.minimal_dv_browse_button = ttk.Button(
+            content,
+            text="Select DV .h5",
+            command=self.choose_dv_file,
+        )
+        self.minimal_dv_browse_button.grid(row=4, column=0, pady=(0, 10))
+        self.minimal_dv_input_path_label = tk.Label(
+            content,
+            textvariable=self.minimal_dv_input_path_var,
+            bg=self._bg_color,
+            fg=self._muted_fg,
+            justify="center",
+            wraplength=420,
+        )
+        self.minimal_dv_input_path_label.grid(
+            row=5,
+            column=0,
+            pady=(0, 18),
+            sticky="ew",
+        )
 
         self.minimal_output_button = ttk.Button(
             content,
             text="Select output folder",
             command=self.choose_batch_output,
         )
-        self.minimal_output_button.grid(row=4, column=0, pady=(0, 10))
+        self.minimal_output_button.grid(row=6, column=0, pady=(0, 10))
         self.minimal_output_path_label = tk.Label(
             content,
             textvariable=self.minimal_output_path_var,
@@ -288,7 +448,7 @@ class ProcessApp(_BaseAppTk):
             justify="center",
             wraplength=420,
         )
-        self.minimal_output_path_label.grid(row=5, column=0, pady=(0, 6), sticky="ew")
+        self.minimal_output_path_label.grid(row=7, column=0, pady=(0, 6), sticky="ew")
         self.minimal_output_name_label = tk.Label(
             content,
             textvariable=self.minimal_output_name_var,
@@ -297,12 +457,17 @@ class ProcessApp(_BaseAppTk):
             justify="center",
             wraplength=420,
         )
-        self.minimal_output_name_label.grid(row=6, column=0, pady=(0, 18), sticky="ew")
+        self.minimal_output_name_label.grid(
+            row=8,
+            column=0,
+            pady=(0, 18),
+            sticky="ew",
+        )
 
         self.minimal_run_button = ttk.Button(
             content, text="Run", command=self.run_batch
         )
-        self.minimal_run_button.grid(row=7, column=0, pady=(0, 18))
+        self.minimal_run_button.grid(row=9, column=0, pady=(0, 18))
 
         self.minimal_progress = ttk.Progressbar(
             content,
@@ -313,7 +478,7 @@ class ProcessApp(_BaseAppTk):
             length=340,
             style=self._progress_primary_style,
         )
-        self.minimal_progress.grid(row=8, column=0, sticky="ew")
+        self.minimal_progress.grid(row=10, column=0, sticky="ew")
         self.minimal_status_label = tk.Label(
             content,
             textvariable=self.minimal_status_var,
@@ -322,7 +487,7 @@ class ProcessApp(_BaseAppTk):
             justify="center",
             wraplength=420,
         )
-        self.minimal_status_label.grid(row=9, column=0, pady=(8, 0), sticky="ew")
+        self.minimal_status_label.grid(row=11, column=0, pady=(8, 0), sticky="ew")
 
     def _get_minimal_title_font(self) -> tkfont.Font:
         if self._minimal_title_font is None:
@@ -350,63 +515,115 @@ class ProcessApp(_BaseAppTk):
     def _install_drop_targets(self) -> None:
         if DND_FILES is None:
             return
-        self._register_drop_target_tree(self)
+        for widget in (
+            self,
+            self.minimal_view,
+            self.advanced_view,
+            self.batch_tab,
+            self.pipeline_library_tab,
+        ):
+            self._register_drop_target(widget)
 
-    def _register_drop_target_tree(self, widget: tk.Misc) -> None:
+        slot_widgets = {
+            "hd": (
+                getattr(self, "minimal_hd_browse_button", None),
+                getattr(self, "minimal_hd_input_path_label", None),
+                getattr(self, "batch_hd_input_entry", None),
+                getattr(self, "batch_hd_browse_button", None),
+            ),
+            "dv": (
+                getattr(self, "minimal_dv_browse_button", None),
+                getattr(self, "minimal_dv_input_path_label", None),
+                getattr(self, "batch_dv_input_entry", None),
+                getattr(self, "batch_dv_browse_button", None),
+            ),
+        }
+        for slot, widgets in slot_widgets.items():
+            for widget in widgets:
+                if widget is not None:
+                    self._register_drop_target(widget, slot)
+
+    def _register_drop_target(
+        self,
+        widget: tk.Misc,
+        slot_hint: str | None = None,
+    ) -> None:
         if DND_FILES is None:
             return
         try:
             widget.drop_target_register(DND_FILES)
-            widget.dnd_bind("<<Drop>>", self._on_input_drop)
+            widget.dnd_bind(
+                "<<Drop>>",
+                lambda event, target_slot=slot_hint: self._on_input_drop(
+                    event, slot_hint=target_slot
+                ),
+            )
         except (AttributeError, tk.TclError):
             pass
-
-        for child in widget.winfo_children():
-            self._register_drop_target_tree(child)
 
     def _build_batch_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(1, weight=1)
         parent.columnconfigure(2, weight=0)
-        parent.rowconfigure(4, weight=1)
+        parent.rowconfigure(5, weight=1)
 
-        ttk.Label(parent, text="Input").grid(row=0, column=0, sticky="w")
-        input_entry = ttk.Entry(parent, textvariable=self.batch_input_var)
-        input_entry.grid(row=0, column=1, sticky="ew", padx=(0, 4))
-        input_btn_frame = ttk.Frame(parent)
-        input_btn_frame.grid(row=0, column=2, sticky="w")
-        ttk.Button(
-            input_btn_frame, text="Browse folder", command=self.choose_batch_folder
-        ).pack(side="left")
-        ttk.Button(
-            input_btn_frame, text="Browse file/zip", command=self.choose_batch_file
-        ).pack(side="left", padx=(4, 0))
+        ttk.Label(parent, text="HD input").grid(row=0, column=0, sticky="w")
+        self.batch_hd_input_entry = ttk.Entry(
+            parent, textvariable=self.batch_hd_input_var
+        )
+        self.batch_hd_input_entry.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+        self.batch_hd_browse_button = ttk.Button(
+            parent, text="Browse", command=self.choose_hd_file
+        )
+        self.batch_hd_browse_button.grid(
+            row=0,
+            column=2,
+            sticky="w",
+        )
 
-        ttk.Label(parent, text="Output").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(parent, text="DV input").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(8, 0),
+        )
+        self.batch_dv_input_entry = ttk.Entry(
+            parent, textvariable=self.batch_dv_input_var
+        )
+        self.batch_dv_input_entry.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=(0, 4),
+            pady=(8, 0),
+        )
+        self.batch_dv_browse_button = ttk.Button(
+            parent, text="Browse", command=self.choose_dv_file
+        )
+        self.batch_dv_browse_button.grid(
+            row=1,
+            column=2,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        ttk.Label(parent, text="Output").grid(row=2, column=0, sticky="w", pady=(8, 0))
         batch_output_entry = ttk.Entry(parent, textvariable=self.batch_output_var)
-        batch_output_entry.grid(row=1, column=1, sticky="ew", padx=(0, 4), pady=(8, 0))
+        batch_output_entry.grid(row=2, column=1, sticky="ew", padx=(0, 4), pady=(8, 0))
         ttk.Button(parent, text="Browse", command=self.choose_batch_output).grid(
-            row=1, column=2, sticky="w", pady=(8, 0)
+            row=2, column=2, sticky="w", pady=(8, 0)
         )
 
         controls = ttk.Frame(parent)
-        controls.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        controls.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 4))
 
         run_btn = ttk.Button(controls, text="Run", command=self.run_batch)
         run_btn.grid(row=0, column=0, sticky="w")
 
-        trim_h5source_btn = ttk.Checkbutton(
-            controls,
-            text="Trim h5 file(s)",
-            variable=self._trim_h5source,
-            command=self._persist_trim_h5source,
-        )
-        trim_h5source_btn.grid(row=0, column=1, sticky="w", padx=(8, 0))
-
         ttk.Label(parent, text="BatchLog").grid(
-            row=3, column=0, sticky="nw", pady=(8, 2)
+            row=4, column=0, sticky="nw", pady=(8, 2)
         )
         batch_output_frame = ttk.Frame(parent)
-        batch_output_frame.grid(row=4, column=0, columnspan=3, sticky="nsew")
+        batch_output_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
         batch_output_frame.columnconfigure(0, weight=1)
         batch_output_frame.rowconfigure(0, weight=1)
         self.batch_output = tk.Text(
@@ -607,20 +824,110 @@ class ProcessApp(_BaseAppTk):
     def _on_batch_paths_changed(self, *_args) -> None:
         self._update_minimal_path_labels()
 
-    def _handle_dropped_paths(self, dropped_paths: Sequence[Path]) -> bool:
-        for dropped_path in dropped_paths:
-            if dropped_path.is_file() and dropped_path.suffix.lower() in {
-                ".h5",
-                ".hdf5",
-                ".zip",
-            }:
-                self.batch_input_var.set(str(dropped_path))
-                self._apply_input_defaults(dropped_path)
-                self._log_batch(f"[INPUT] Drag and drop -> {dropped_path}")
-                return True
-        return False
+    @staticmethod
+    def _input_slot_label(slot: str) -> str:
+        return {
+            "hd": "HD",
+            "dv": "DV",
+            "both": "HD + DV",
+            "work": "Work",
+        }.get(slot, slot.upper())
 
-    def _on_input_drop(self, event) -> None:
+    def _batch_input_var_for(self, slot: str) -> tk.StringVar:
+        if slot == "dv":
+            return self.batch_dv_input_var
+        return self.batch_hd_input_var
+
+    def _path_from_var(self, raw_value: str) -> Path | None:
+        value = raw_value.strip()
+        if not value:
+            return None
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path
+
+    def _selected_input_paths(self) -> tuple[Path | None, Path | None]:
+        return (
+            self._path_from_var(self.batch_hd_input_var.get() or ""),
+            self._path_from_var(self.batch_dv_input_var.get() or ""),
+        )
+
+    def _primary_input_path(self) -> Path | None:
+        hd_path, dv_path = self._selected_input_paths()
+        return hd_path or dv_path
+
+    def _classify_dropped_input(self, dropped_path: Path) -> str | None:
+        normalized = dropped_path.stem.lower()
+        if re.search(r"(doppler[_\-\s]*vision|(?:^|[_\-\s])dv(?:$|[_\-\s]))", normalized):
+            return "dv"
+        if re.search(r"(holodoppler|(?:^|[_\-\s])hd(?:$|[_\-\s]))", normalized):
+            return "hd"
+        return None
+
+    def _assign_input_path(self, slot: str, input_path: Path) -> None:
+        normalized_path = input_path.expanduser()
+        if not normalized_path.is_absolute():
+            normalized_path = Path.cwd() / normalized_path
+        self._batch_input_var_for(slot).set(str(normalized_path))
+        self._apply_input_defaults(normalized_path)
+
+    def _handle_dropped_paths(
+        self,
+        dropped_paths: Sequence[Path],
+        *,
+        slot_hint: str | None = None,
+    ) -> bool:
+        valid_paths: list[Path] = []
+        for dropped_path in dropped_paths:
+            cleaned = str(dropped_path).strip().strip("{}")
+            if not cleaned:
+                continue
+            candidate = Path(cleaned).expanduser()
+            if (
+                candidate.is_file()
+                and candidate.suffix.lower() in {".h5", ".hdf5"}
+            ):
+                valid_paths.append(candidate)
+
+        if not valid_paths:
+            return False
+
+        assigned: list[tuple[str, Path]] = []
+        assigned_slots: set[str] = set()
+        for dropped_path in valid_paths:
+            slot = slot_hint or self._classify_dropped_input(dropped_path)
+            if slot is None:
+                for candidate_slot in ("hd", "dv"):
+                    current_value = (
+                        self._batch_input_var_for(candidate_slot).get() or ""
+                    ).strip()
+                    if not current_value and candidate_slot not in assigned_slots:
+                        slot = candidate_slot
+                        break
+                if slot is None:
+                    for candidate_slot in ("hd", "dv"):
+                        if candidate_slot not in assigned_slots:
+                            slot = candidate_slot
+                            break
+            if slot is None:
+                continue
+            self._assign_input_path(slot, dropped_path)
+            assigned.append((slot, dropped_path))
+            assigned_slots.add(slot)
+            if slot_hint is not None:
+                break
+
+        if not assigned:
+            return False
+
+        for slot, dropped_path in assigned:
+            self._log_batch(
+                f"[INPUT] Drag and drop {self._input_slot_label(slot)} -> {dropped_path}"
+            )
+        return True
+
+    def _on_input_drop(self, event, *, slot_hint: str | None = None) -> None:
         raw_data = getattr(event, "data", "")
         try:
             dropped_values = self.tk.splitlist(raw_data)
@@ -628,40 +935,72 @@ class ProcessApp(_BaseAppTk):
             dropped_values = (raw_data,)
 
         dropped_paths = [Path(value) for value in dropped_values if value]
-        if self._handle_dropped_paths(dropped_paths):
+        if self._handle_dropped_paths(dropped_paths, slot_hint=slot_hint):
             return
 
         messagebox.showwarning(
             "Unsupported drop",
-            "Drop a single .h5, .hdf5, or .zip file into the window.",
+            "Drop one or two .h5/.hdf5 files into the HD or DV input area.",
         )
 
-    def _default_output_stem(self, input_path: Path) -> str:
-        if input_path.is_file():
-            base_name = input_path.stem
-        else:
-            base_name = input_path.name
-        base_name = base_name or "output"
+    def _normalized_input_token(self, input_path: Path) -> str:
+        token = re.sub(
+            r"(?i)(holodoppler|doppler[_\-\s]*vision|(?:^|[_\-\s])hd(?:$|[_\-\s])|(?:^|[_\-\s])dv(?:$|[_\-\s]))",
+            "_",
+            input_path.stem,
+        )
+        token = re.sub(r"[_\-\s]+", "_", token).strip("_")
+        return token or input_path.stem or "output"
+
+    def _default_output_stem(self) -> str:
+        hd_path, dv_path = self._selected_input_paths()
+        tokens: list[str] = []
+        for input_path in (hd_path, dv_path):
+            if input_path is None:
+                continue
+            token = self._normalized_input_token(input_path)
+            if token not in tokens:
+                tokens.append(token)
+        base_name = "_".join(tokens) if tokens else "output"
         return f"{base_name}_eyeflow"
 
-    def _default_archive_name(self, input_path: Path) -> str:
-        return f"{self._default_output_stem(input_path)}.zip"
+    def _default_work_h5_name(self) -> str:
+        return f"{self._default_output_stem()}.h5"
 
-    def _default_output_artifact_name(self, input_path: Path) -> str:
-        if input_path.is_file() and input_path.suffix.lower() == ".zip":
-            return self._default_archive_name(input_path)
-        return f"{self._default_output_stem(input_path)}.h5"
+    def _default_archive_name(self) -> str:
+        return f"{self._default_output_stem()}.zip"
+
+    def _default_output_artifact_name(self) -> str:
+        if self.batch_zip_var.get():
+            return self._default_archive_name()
+        return self._default_work_h5_name()
+
+    def _next_available_output_path(self, output_path: Path) -> Path:
+        if not output_path.exists():
+            return output_path
+        suffix = output_path.suffix
+        stem = output_path.stem
+        parent = output_path.parent
+        idx = 1
+        candidate = parent / f"{stem}_{idx}{suffix}"
+        while candidate.exists():
+            idx += 1
+            candidate = parent / f"{stem}_{idx}{suffix}"
+        return candidate
 
     def _update_minimal_path_labels(self) -> None:
-        raw_value = (self.batch_input_var.get() or "").strip()
-        if not raw_value:
-            self.minimal_input_path_var.set("No input selected")
+        hd_path, dv_path = self._selected_input_paths()
+        self.minimal_hd_input_path_var.set(
+            str(hd_path) if hd_path is not None else "No HD input selected"
+        )
+        self.minimal_dv_input_path_var.set(
+            str(dv_path) if dv_path is not None else "No DV input selected"
+        )
+        if hd_path is None and dv_path is None:
             self.minimal_output_name_var.set("Output name: -")
         else:
-            input_path = Path(raw_value)
-            self.minimal_input_path_var.set(str(input_path))
             self.minimal_output_name_var.set(
-                f"Output name: {self._default_output_artifact_name(input_path)}"
+                f"Output name: {self._default_output_artifact_name()}"
             )
 
         output_value = (self.batch_output_var.get() or "").strip()
@@ -728,32 +1067,19 @@ class ProcessApp(_BaseAppTk):
         self._set_progress_units(self._progress_completed_units + units)
 
     def _apply_input_defaults(self, input_path: Path) -> None:
-        output_dir = input_path if input_path.is_dir() else input_path.parent
+        output_dir = input_path.parent if input_path.is_file() else input_path
 
         self.batch_output_var.set(str(output_dir))
-        self.batch_zip_name_var.set(self._default_archive_name(input_path))
-        self.batch_zip_var.set(
-            input_path.is_file() and input_path.suffix.lower() == ".zip"
-        )
+        self.batch_zip_name_var.set(self._default_archive_name())
         self._reset_progress()
         self._set_minimal_status("Ready.")
 
-    def _minimal_output_filename_for_run(
-        self,
-        data_path: Path,
-        inputs: Sequence[Path],
-    ) -> str | None:
+    def _minimal_output_filename_for_run(self) -> str | None:
         if self.ui_mode != "minimal":
             return None
         if self.batch_zip_var.get():
             return None
-        if len(inputs) != 1:
-            return None
-        if not data_path.is_file():
-            return None
-        if data_path.suffix.lower() not in {".h5", ".hdf5"}:
-            return None
-        return self._default_output_artifact_name(data_path)
+        return self._default_work_h5_name()
 
     def _build_pipeline_library_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -870,6 +1196,7 @@ class ProcessApp(_BaseAppTk):
         )
         self.pipeline_registry = {p.name: p for p in available}
         self.pipeline_catalog = {p.name: p for p in rows}
+        rows = self._sync_pipeline_order(rows)
         self.pipeline_rows = rows
         self._sync_pipeline_visibility(rows)
         self._populate_pipeline_library(rows)
@@ -907,13 +1234,17 @@ class ProcessApp(_BaseAppTk):
         for child in self.pipeline_library_inner.winfo_children():
             child.destroy()
         self.pipeline_visibility_vars = {}
+        self.pipeline_row_widgets = {}
         self.pipeline_library_inner.columnconfigure(0, weight=1)
 
         selected_header = ttk.Label(self.pipeline_library_inner, text="Selected")
         selected_header.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        order_header = ttk.Label(self.pipeline_library_inner, text="Pipeline")
+        order_header.grid(row=0, column=1, sticky="w", padx=(12, 0), pady=(0, 6))
         status_header = ttk.Label(self.pipeline_library_inner, text="Status")
-        status_header.grid(row=0, column=1, sticky="w", padx=(12, 0), pady=(0, 6))
+        status_header.grid(row=0, column=2, sticky="w", padx=(12, 0), pady=(0, 6))
         self._bind_vertical_mousewheel(selected_header, self.pipeline_library_canvas)
+        self._bind_vertical_mousewheel(order_header, self.pipeline_library_canvas)
         self._bind_vertical_mousewheel(status_header, self.pipeline_library_canvas)
 
         for idx, pipeline in enumerate(rows, start=1):
@@ -922,31 +1253,250 @@ class ProcessApp(_BaseAppTk):
                 value=self.pipeline_visibility.get(pipeline.name, False)
                 and is_available
             )
+            row_frame = ttk.Frame(self.pipeline_library_inner)
+            row_frame.grid(
+                row=idx,
+                column=0,
+                columnspan=3,
+                sticky="ew",
+                pady=(0, 6),
+            )
+            row_frame.columnconfigure(1, weight=1)
+
             check = ttk.Checkbutton(
-                self.pipeline_library_inner,
-                text=pipeline.name,
+                row_frame,
+                text="",
                 variable=var,
                 state="normal" if is_available else "disabled",
                 command=lambda name=pipeline.name, visible_var=var: (
                     self._set_pipeline_visibility(name, visible_var.get())
                 ),
             )
-            check.grid(row=idx, column=0, sticky="w", pady=(0, 6))
+            check.grid(row=0, column=0, sticky="w")
+            name_label = ttk.Label(
+                row_frame,
+                text=pipeline.name,
+                cursor="fleur" if is_available else "",
+            )
+            name_label.grid(row=0, column=1, sticky="w", padx=(12, 0))
             self._bind_vertical_mousewheel(check, self.pipeline_library_canvas)
+            self._bind_vertical_mousewheel(name_label, self.pipeline_library_canvas)
+            self._bind_vertical_mousewheel(row_frame, self.pipeline_library_canvas)
+            self.pipeline_row_widgets[pipeline.name] = row_frame
+
+            if is_available:
+                for widget in (row_frame, name_label):
+                    self._bind_pipeline_drag(widget, pipeline.name)
 
             status_text = self._pipeline_status_text(pipeline)
-            status = ttk.Label(self.pipeline_library_inner, text=status_text)
-            status.grid(row=idx, column=1, sticky="w", padx=(12, 0), pady=(0, 6))
+            status = ttk.Label(row_frame, text=status_text)
+            status.grid(row=0, column=2, sticky="w", padx=(12, 0))
             self._bind_vertical_mousewheel(status, self.pipeline_library_canvas)
+            if is_available:
+                self._bind_pipeline_drag(status, pipeline.name)
 
             tip_text = self._descriptor_tooltip_text(pipeline)
             if tip_text:
                 _Tooltip(check, tip_text, bg=self._surface_color, fg=self._text_fg)
+                _Tooltip(name_label, tip_text, bg=self._surface_color, fg=self._text_fg)
                 _Tooltip(status, tip_text, bg=self._surface_color, fg=self._text_fg)
 
             self.pipeline_visibility_vars[pipeline.name] = var
 
+        if self._pipeline_drop_indicator is None or not self._pipeline_drop_indicator.winfo_exists():
+            self._pipeline_drop_indicator = tk.Frame(
+                self.pipeline_library_inner,
+                bg=self._accent_color,
+                height=2,
+                highlightthickness=0,
+                bd=0,
+            )
+        self._hide_pipeline_drop_indicator()
         self._update_pipeline_library_summary()
+
+    def _bind_pipeline_drag(self, widget: tk.Widget, name: str) -> None:
+        widget.bind(
+            "<ButtonPress-1>",
+            lambda event, pipeline_name=name: self._start_pipeline_drag(
+                event,
+                pipeline_name,
+            ),
+            add="+",
+        )
+        widget.bind(
+            "<B1-Motion>",
+            self._on_pipeline_drag_motion,
+            add="+",
+        )
+        widget.bind(
+            "<ButtonRelease-1>",
+            self._finish_pipeline_drag,
+            add="+",
+        )
+
+    def _sync_pipeline_order(
+        self,
+        rows: list[PipelineDescriptor],
+    ) -> list[PipelineDescriptor]:
+        ordered_names, changed = normalize_pipeline_order(
+            (pipeline.name for pipeline in rows),
+            self.settings_store.load_pipeline_order(),
+        )
+        rows_by_name = {pipeline.name: pipeline for pipeline in rows}
+        ordered_rows = [
+            rows_by_name[name] for name in ordered_names if name in rows_by_name
+        ]
+        if changed:
+            self._persist_pipeline_order(ordered_rows)
+        return ordered_rows
+
+    def _persist_pipeline_order(
+        self,
+        rows: Sequence[PipelineDescriptor] | None = None,
+    ) -> None:
+        order = [pipeline.name for pipeline in (rows or self.pipeline_rows)]
+        try:
+            self.settings_store.save_pipeline_order(order)
+        except OSError as exc:
+            self._show_settings_warning(
+                "Settings not saved",
+                f"Could not save pipeline order preference:\n{exc}",
+            )
+
+    def _pipeline_index(self, name: str) -> int | None:
+        return next(
+            (idx for idx, pipeline in enumerate(self.pipeline_rows) if pipeline.name == name),
+            None,
+        )
+
+    def _move_pipeline_to_index(
+        self,
+        name: str,
+        target_index: int,
+        *,
+        persist: bool = True,
+        refresh: bool = True,
+    ) -> bool:
+        current_index = self._pipeline_index(name)
+        if current_index is None:
+            return False
+
+        rows = list(self.pipeline_rows)
+        pipeline = rows.pop(current_index)
+        target_index = max(0, min(int(target_index), len(rows)))
+        if target_index > current_index:
+            target_index -= 1
+        rows.insert(target_index, pipeline)
+        if rows == self.pipeline_rows:
+            return False
+
+        self.pipeline_rows = rows
+        if persist:
+            self._persist_pipeline_order()
+        if refresh:
+            self._populate_pipeline_library(self.pipeline_rows)
+        return True
+
+    def _move_pipeline_to_top(
+        self,
+        name: str,
+        *,
+        persist: bool = True,
+        refresh: bool = True,
+    ) -> bool:
+        return self._move_pipeline_to_index(
+            name,
+            0,
+            persist=persist,
+            refresh=refresh,
+        )
+
+    def _pipeline_drop_index(self, root_y: int) -> int:
+        if not self.pipeline_rows:
+            return 0
+        self.pipeline_library_inner.update_idletasks()
+        for idx, pipeline in enumerate(self.pipeline_rows):
+            widget = self.pipeline_row_widgets.get(pipeline.name)
+            if widget is None or not widget.winfo_exists():
+                continue
+            midpoint = widget.winfo_rooty() + (widget.winfo_height() / 2.0)
+            if root_y < midpoint:
+                return idx
+        return len(self.pipeline_rows)
+
+    def _pipeline_drop_indicator_y(self, drop_index: int) -> int:
+        if not self.pipeline_rows:
+            return 0
+        clamped_index = max(0, min(drop_index, len(self.pipeline_rows)))
+        if clamped_index >= len(self.pipeline_rows):
+            last_widget = self.pipeline_row_widgets.get(self.pipeline_rows[-1].name)
+            if last_widget is None or not last_widget.winfo_exists():
+                return 0
+            return int(last_widget.winfo_y() + last_widget.winfo_height())
+
+        widget = self.pipeline_row_widgets.get(self.pipeline_rows[clamped_index].name)
+        if widget is None or not widget.winfo_exists():
+            return 0
+        return int(widget.winfo_y())
+
+    def _show_pipeline_drop_indicator(self, drop_index: int) -> None:
+        indicator = getattr(self, "_pipeline_drop_indicator", None)
+        if indicator is None:
+            return
+        self.pipeline_library_inner.update_idletasks()
+        indicator_y = self._pipeline_drop_indicator_y(drop_index)
+        indicator_width = max(self.pipeline_library_inner.winfo_width(), 1)
+        indicator.place(
+            x=0,
+            y=max(indicator_y - 1, 0),
+            width=indicator_width,
+            height=2,
+        )
+        indicator.lift()
+
+    def _hide_pipeline_drop_indicator(self) -> None:
+        indicator = getattr(self, "_pipeline_drop_indicator", None)
+        if indicator is not None:
+            indicator.place_forget()
+
+    def _start_pipeline_drag(self, event, name: str) -> str:
+        self._dragging_pipeline_name = name
+        self._dragging_pipeline_active = False
+        self._drag_start_root_y = int(event.y_root)
+        try:
+            event.widget.grab_set()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _on_pipeline_drag_motion(self, event) -> str:
+        if getattr(self, "_dragging_pipeline_name", None) is None:
+            return "break"
+        if not getattr(self, "_dragging_pipeline_active", False):
+            if abs(int(event.y_root) - self._drag_start_root_y) < 4:
+                return "break"
+            self._dragging_pipeline_active = True
+        drop_index = self._pipeline_drop_index(int(event.y_root))
+        self._show_pipeline_drop_indicator(drop_index)
+        return "break"
+
+    def _finish_pipeline_drag(self, event) -> str:
+        name = getattr(self, "_dragging_pipeline_name", None)
+        self._dragging_pipeline_name = None
+        was_active = getattr(self, "_dragging_pipeline_active", False)
+        self._dragging_pipeline_active = False
+        try:
+            event.widget.grab_release()
+        except tk.TclError:
+            pass
+        self._hide_pipeline_drop_indicator()
+        if not name:
+            return "break"
+        if not was_active:
+            return "break"
+        target_index = self._pipeline_drop_index(int(event.y_root))
+        self._move_pipeline_to_index(name, target_index)
+        return "break"
 
     def _sync_pipeline_visibility(self, rows: list[PipelineDescriptor]) -> None:
         visibility, changed = normalize_pipeline_visibility(
@@ -978,6 +1528,9 @@ class ProcessApp(_BaseAppTk):
             return
         self.pipeline_visibility[name] = visible
         self._persist_pipeline_visibility()
+        if visible:
+            if self._move_pipeline_to_top(name):
+                return
         self._update_pipeline_library_summary()
 
     def _set_all_pipeline_visibility(self, visible: bool) -> None:
@@ -1090,24 +1643,25 @@ class ProcessApp(_BaseAppTk):
             message,
         )
 
-    def choose_batch_folder(self) -> None:
-        path = filedialog.askdirectory(
-            initialdir=self.batch_input_var.get() or None,
-            title="Select folder containing HDF5 files",
-        )
-        if path:
-            self.batch_input_var.set(path)
-            self._apply_input_defaults(Path(path))
-
-    def choose_batch_file(self) -> None:
+    def choose_hd_file(self) -> None:
+        initial_dir = self.batch_hd_input_var.get() or os.path.abspath("example_file")
         path = filedialog.askopenfilename(
-            filetypes=[("HDF5 or zip", "*.h5 *.hdf5 *.zip"), ("All files", "*.*")],
-            initialdir=self.batch_input_var.get() or os.path.abspath("h5_example"),
-            title="Select HDF5 file or .zip archive",
+            filetypes=[("HDF5", "*.h5 *.hdf5"), ("All files", "*.*")],
+            initialdir=initial_dir,
+            title="Select holodoppler HDF5 file",
         )
         if path:
-            self.batch_input_var.set(path)
-            self._apply_input_defaults(Path(path))
+            self._assign_input_path("hd", Path(path))
+
+    def choose_dv_file(self) -> None:
+        initial_dir = self.batch_dv_input_var.get() or os.path.abspath("example_file")
+        path = filedialog.askopenfilename(
+            filetypes=[("HDF5", "*.h5 *.hdf5"), ("All files", "*.*")],
+            initialdir=initial_dir,
+            title="Select doppler vision HDF5 file",
+        )
+        if path:
+            self._assign_input_path("dv", Path(path))
 
     def choose_batch_output(self) -> None:
         path = filedialog.askdirectory(
@@ -1117,16 +1671,39 @@ class ProcessApp(_BaseAppTk):
         if path:
             self.batch_output_var.set(path)
 
-    def run_batch(self) -> None:
-        self._reset_progress()
-        data_value = (self.batch_input_var.get() or "").strip()
-        if not data_value:
+    def _validate_selected_inputs(
+        self,
+        holodoppler_h5: Path | None,
+        doppler_vision_h5: Path | None,
+        pipelines: Sequence[PipelineDescriptor],
+    ) -> bool:
+        del pipelines
+        if holodoppler_h5 is None or doppler_vision_h5 is None:
             messagebox.showwarning(
                 "Missing input",
-                "Select a folder, HDF5 file, or .zip archive to process.",
+                "Select both HD and DV HDF5 files.",
             )
-            return
-        data_path = Path(data_value).expanduser()
+            return False
+
+        for slot, path in (("hd", holodoppler_h5), ("dv", doppler_vision_h5)):
+            if not path.exists():
+                messagebox.showerror(
+                    f"Missing {self._input_slot_label(slot)} input",
+                    f"{self._input_slot_label(slot)} input does not exist:\n{path}",
+                )
+                return False
+            if not path.is_file() or path.suffix.lower() not in {".h5", ".hdf5"}:
+                messagebox.showerror(
+                    f"Invalid {self._input_slot_label(slot)} input",
+                    f"{self._input_slot_label(slot)} input must be a .h5 or .hdf5 file:\n{path}",
+                )
+                return False
+
+        return True
+
+    def run_batch(self) -> None:
+        self._reset_progress()
+        holodoppler_h5, doppler_vision_h5 = self._selected_input_paths()
 
         selected_names = [
             pipeline.name
@@ -1154,6 +1731,13 @@ class ProcessApp(_BaseAppTk):
             )
             return
 
+        if not self._validate_selected_inputs(
+            holodoppler_h5,
+            doppler_vision_h5,
+            pipelines,
+        ):
+            return
+
         base_output_value = (self.batch_output_var.get() or "").strip()
         base_output_dir = (
             Path(base_output_value).expanduser() if base_output_value else Path.cwd()
@@ -1162,94 +1746,82 @@ class ProcessApp(_BaseAppTk):
             base_output_dir = Path.cwd() / base_output_dir
         base_output_dir.mkdir(parents=True, exist_ok=True)
 
-        self._reset_batch_output("Starting batch run...\n")
-        self._set_minimal_status("Preparing batch...")
+        self._reset_batch_output("Starting pipeline run...\n")
+        if holodoppler_h5 is not None:
+            self._log_batch(f"[INPUT] HD -> {holodoppler_h5}")
+        if doppler_vision_h5 is not None:
+            self._log_batch(f"[INPUT] DV -> {doppler_vision_h5}")
 
-        tempdir: tempfile.TemporaryDirectory | None = None
-        try:
-            data_root, tempdir = self._prepare_data_root(data_path)
-            inputs = self._find_h5_inputs(data_root)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Invalid input", f"Cannot prepare input: {exc}")
-            self._log_batch(f"Error: {exc}")
-            self._set_minimal_status("Run failed.")
-            if tempdir is not None:
-                tempdir.cleanup()
-            return
-
-        pipeline_progress_units = len(inputs) * len(pipelines)
-        final_progress_units = 1 if self.batch_zip_var.get() else 0
         self._start_progress(
-            pipeline_progress_units,
+            len(pipelines),
             style_name=self._progress_primary_style,
             status_text="Running pipelines...",
-        )
-        minimal_output_filename = self._minimal_output_filename_for_run(
-            data_path,
-            inputs,
         )
 
         work_output_dir: Path | None = None
         clean_work_output = False
-        zip_failed = False
+        output_h5_path: Path | None = None
         try:
-            output_dir = base_output_dir
             if self.batch_zip_var.get():
                 work_output_dir = Path(tempfile.mkdtemp(dir=base_output_dir))
-                output_dir = work_output_dir
-
-            failures: list[str] = []
-            processed_outputs: list[Path] = []
-            for h5_path in inputs:
-                try:
-                    relative_parent = self._relative_input_parent(h5_path, data_root)
-                    combined_output = self._run_pipelines_on_file(
-                        h5_path,
-                        pipelines,
-                        output_dir,
-                        output_relative_parent=relative_parent,
-                        output_filename=minimal_output_filename,
-                    )
-                    processed_outputs.append(combined_output)
-                except Exception as exc:  # noqa: BLE001
-                    failures.append(f"{h5_path}: {exc}")
-                    self._log_batch(f"[FAIL] {h5_path.name}: {exc}")
-
-            if final_progress_units:
-                self._start_progress(
-                    final_progress_units,
-                    style_name=self._progress_final_style,
-                    status_text="Creating ZIP...",
+                output_h5_path = work_output_dir / self._default_work_h5_name()
+            else:
+                output_name = (
+                    self._minimal_output_filename_for_run()
+                    or self._default_work_h5_name()
+                )
+                output_h5_path = self._next_available_output_path(
+                    base_output_dir / output_name
                 )
 
-            summary_msg: str
+            self._log_batch(f"[OUTPUT] {output_h5_path}")
+
+            try:
+                self._run_pipelines_to_output(
+                    output_h5_path=output_h5_path,
+                    pipelines=pipelines,
+                    holodoppler_h5=holodoppler_h5,
+                    doppler_vision_h5=doppler_vision_h5,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure_message = str(exc)
+                self._log_batch(f"[FAIL] {failure_message}")
+                if work_output_dir is not None:
+                    self._log_batch(f"[FAIL] Partial output kept under: {work_output_dir}")
+                self._set_minimal_status("Run failed.")
+                messagebox.showerror("Run failed", failure_message)
+                return
+
+            summary_msg = f"Output file: {output_h5_path}"
             if self.batch_zip_var.get():
                 try:
-                    zip_name = self.batch_zip_name_var.get().strip() or "outputs.zip"
-                    if not zip_name.lower().endswith(".zip"):
-                        zip_name += ".zip"
+                    self._start_progress(
+                        1,
+                        style_name=self._progress_final_style,
+                        status_text="Creating ZIP...",
+                    )
                     self._set_minimal_status("Creating ZIP...")
                     self._log_batch("[ZIP] Preparing archive...")
                     last_progress_log = 0.0
-                    zip_progress_base = self._progress_completed_units
 
                     def _zip_progress(done: int, total: int, _rel_path: Path) -> None:
                         nonlocal last_progress_log
-                        fraction = 1.0 if total == 0 else done / total
-                        self._set_progress_units(zip_progress_base + fraction)
+                        self._set_progress_units(1.0 if total == 0 else done / total)
                         now = time.monotonic()
                         if done == total or (now - last_progress_log) >= 0.5:
                             pct = 100 if total == 0 else int((done * 100) / total)
                             self._log_batch(f"[ZIP] {done}/{total} files ({pct}%)")
                             last_progress_log = now
                             try:
-                                # Keep the UI responsive while archiving large batches.
                                 self.update()
                             except tk.TclError:
                                 pass
 
+                    zip_name = self.batch_zip_name_var.get().strip() or "outputs.zip"
+                    if not zip_name.lower().endswith(".zip"):
+                        zip_name += ".zip"
                     zip_path = self._zip_output_dir(
-                        output_dir,
+                        work_output_dir,
                         target_path=base_output_dir / zip_name,
                         progress_callback=_zip_progress,
                     )
@@ -1257,151 +1829,71 @@ class ProcessApp(_BaseAppTk):
                     summary_msg = f"ZIP archive: {zip_path}"
                     clean_work_output = True
                 except Exception as exc:  # noqa: BLE001
-                    zip_failed = True
-                    self._set_progress_units(zip_progress_base + 1.0)
                     self._log_batch(f"[ZIP FAIL] {exc}")
+                    self._set_progress_units(1.0)
                     messagebox.showerror(
                         "Zip failed", f"Could not create ZIP archive: {exc}"
                     )
-                    summary_msg = f"Outputs stored under: {output_dir}"
-            else:
-                if len(processed_outputs) == 1:
-                    summary_msg = f"Output file: {processed_outputs[0]}"
-                else:
-                    summary_msg = f"Outputs stored under: {output_dir}"
+                    summary_msg = f"Outputs stored under: {work_output_dir}"
 
             self._set_progress_units(self._progress_total_units)
             self._log_batch(f"Completed. {summary_msg}")
-
-            if failures:
-                self._set_minimal_status("Completed with errors.")
-                self._show_batch_error_dialog(
-                    f"{len(failures)} failure(s). See log for details.\n\n{summary_msg}"
-                )
-            else:
-                self._set_minimal_status(
-                    "Completed with errors." if zip_failed else "Process ended."
-                )
+            self._set_minimal_status("Process ended.")
         finally:
-            if tempdir is not None:
-                tempdir.cleanup()
             if clean_work_output and work_output_dir is not None:
                 shutil.rmtree(work_output_dir, ignore_errors=True)
 
-    def _prepare_data_root(
-        self, data_path: Path
-    ) -> tuple[Path, tempfile.TemporaryDirectory | None]:
-        if data_path.is_file() and data_path.suffix.lower() == ".zip":
-            tempdir = tempfile.TemporaryDirectory()
-            with zipfile.ZipFile(data_path, "r") as zf:
-                zf.extractall(tempdir.name)
-            return Path(tempdir.name), tempdir
-        return data_path, None
-
-    def _find_h5_inputs(self, path: Path) -> list[Path]:
-        if path.is_file():
-            if path.suffix.lower() in {".h5", ".hdf5"}:
-                return [path]
-            raise ValueError(f"File is not an HDF5 file: {path}")
-        if path.is_dir():
-            files = sorted({*path.rglob("*.h5"), *path.rglob("*.hdf5")})
-            return files
-        raise FileNotFoundError(f"Input path does not exist: {path}")
-
-    def _relative_input_parent(self, h5_path: Path, input_root: Path) -> Path:
-        if input_root.is_dir():
-            try:
-                return h5_path.resolve().relative_to(input_root.resolve()).parent
-            except ValueError:
-                pass
-        return Path(".")
-
-    def _run_pipelines_on_file(
+    def _run_pipelines_to_output(
         self,
-        h5_path: Path,
+        *,
+        output_h5_path: Path,
         pipelines: Sequence[PipelineDescriptor],
-        output_root: Path,
-        output_relative_parent: Path = Path("."),
-        output_filename: str | None = None,
+        holodoppler_h5: Path | None,
+        doppler_vision_h5: Path | None,
     ) -> Path:
-        target_dir = output_root / output_relative_parent
-        target_dir.mkdir(parents=True, exist_ok=True)
-        if output_filename:
-            base_output_path = target_dir / output_filename
-            combined_h5_out = base_output_path
-        else:
-            combined_h5_out = target_dir / f"{h5_path.stem}_pipelines_result.h5"
-        suffix = 1
-        while combined_h5_out.exists():
-            if output_filename:
-                combined_h5_out = (
-                    target_dir
-                    / f"{base_output_path.stem}_{suffix}{base_output_path.suffix}"
-                )
-            else:
-                combined_h5_out = (
-                    target_dir / f"{h5_path.stem}_{suffix}_pipelines_result.h5"
-                )
-            suffix += 1
+        output_h5_path.parent.mkdir(parents=True, exist_ok=True)
+        with ExitStack() as stack:
+            work_h5 = stack.enter_context(h5py.File(output_h5_path, "w"))
+            hd_h5 = (
+                stack.enter_context(h5py.File(holodoppler_h5, "r"))
+                if holodoppler_h5 is not None
+                else None
+            )
+            dv_h5 = (
+                stack.enter_context(h5py.File(doppler_vision_h5, "r"))
+                if doppler_vision_h5 is not None
+                else None
+            )
+            initialize_output_h5(
+                work_h5,
+                holodoppler_source_file=(
+                    str(holodoppler_h5) if holodoppler_h5 is not None else None
+                ),
+                doppler_vision_source_file=(
+                    str(doppler_vision_h5) if doppler_vision_h5 is not None else None
+                ),
+            )
+            work_h5.attrs["trim_h5source"] = True
+            work_h5.attrs["pipeline_order"] = [pipeline.name for pipeline in pipelines]
 
-        pipeline_results: list[tuple[str, ProcessResult]] = []
-        with h5py.File(h5_path, "r") as h5file:
             for pipeline_desc in pipelines:
                 pipeline = pipeline_desc.instantiate()
+                pipeline_input = _PipelineInputView(
+                    work_h5=work_h5,
+                    holodoppler_h5=hd_h5,
+                    doppler_vision_h5=dv_h5,
+                )
                 try:
-                    result = pipeline.run(h5file)
+                    result = pipeline.run(pipeline_input)
                 except Exception as exc:  # noqa: BLE001
                     raise RuntimeError(
                         format_pipeline_exception(exc, pipeline)
                     ) from exc
-                pipeline_results.append((pipeline.name, result))
-                self._log_batch(f"[OK] {h5_path.name} -> {pipeline.name}")
+                append_result_group(work_h5, pipeline.name, result)
+                result.output_h5_path = str(output_h5_path)
+                self._log_batch(f"[OK] {pipeline.name}")
                 self._advance_progress()
-        self._log_batch(f"[SAVE] Writing output file -> {combined_h5_out.name}")
-        self._write_combined_results_with_ui_pump(
-            pipeline_results=pipeline_results,
-            combined_h5_out=combined_h5_out,
-            source_file=str(h5_path),
-        )
-        for _, result in pipeline_results:
-            result.output_h5_path = str(combined_h5_out)
-        self._log_batch(f"[OK] {h5_path.name}: combined results -> {combined_h5_out}")
-        return combined_h5_out
-
-    def _write_combined_results_with_ui_pump(
-        self,
-        pipeline_results: Sequence[tuple[str, ProcessResult]],
-        combined_h5_out: Path,
-        source_file: str,
-    ) -> None:
-        errors: list[Exception] = []
-        done_event = threading.Event()
-
-        def _worker() -> None:
-            try:
-                write_combined_results_h5(
-                    pipeline_results,
-                    combined_h5_out,
-                    source_file=source_file,
-                    trim_source=self._trim_h5source.get(),
-                )
-            except Exception as exc:  # noqa: BLE001
-                errors.append(exc)
-            finally:
-                done_event.set()
-
-        writer_thread = threading.Thread(target=_worker, daemon=True)
-        writer_thread.start()
-        while not done_event.wait(timeout=0.05):
-            try:
-                # Let Tk process paint/events while output file is being written.
-                self.update_idletasks()
-                self.update()
-            except tk.TclError:
-                break
-        writer_thread.join()
-        if errors:
-            raise errors[0]
+        return output_h5_path
 
     def _zip_output_dir(
         self,

@@ -38,7 +38,7 @@ except ImportError:  #  optional dependency
 
 from pipelines import PipelineDescriptor, load_pipeline_catalog
 from pipelines.core.errors import format_pipeline_exception
-from pipelines.core.utils import append_result_group, initialize_output_h5
+from utils.io import append_result_group, initialize_output_h5
 
 _BaseAppTk = TkinterDnD.Tk if TkinterDnD is not None else tk.Tk
 
@@ -2331,9 +2331,7 @@ class ProcessApp(_BaseAppTk):
                     self._minimal_output_filename_for_run()
                     or self._default_work_h5_name_for_input(resolved_input.holo_path)
                 )
-                output_h5_path = self._next_available_output_path(
-                    base_output_dir / output_name
-                )
+                output_h5_path = base_output_dir / output_name
 
             self._log_batch(f"[OUTPUT] {output_h5_path}")
 

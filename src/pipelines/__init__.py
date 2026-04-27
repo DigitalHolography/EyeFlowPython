@@ -12,7 +12,7 @@ from .core.base import (
     ProcessPipeline,
     ProcessResult,
 )
-from .core.utils import write_combined_results_h5, write_result_h5
+from utils.io import write_combined_results_h5, write_result_h5
 
 
 def _extend_with_external_pipeline_dir() -> None:

@@ -31,7 +31,7 @@ from pipelines import (
     load_pipeline_catalog,
 )
 from pipelines.core.errors import format_pipeline_exception
-from pipelines.core.utils import write_combined_results_h5
+from utils.io import write_combined_results_h5
 
 
 def _build_pipeline_registry() -> dict[str, PipelineDescriptor]:

@@ -173,6 +173,7 @@ class _EyeFlowView:
 @dataclass(frozen=True)
 class _ResolvedBatchInputs:
     holo_path: Path
+    relative_holo_path: Path
     data_dir: Path
     hd_dir: Path
     dv_dir: Path
@@ -293,9 +294,11 @@ class ProcessApp(_BaseAppTk):
         self.batch_zip_var = tk.BooleanVar(value=False)
         self.batch_zip_name_var = tk.StringVar(value="outputs.zip")
         self.batch_progress_var = tk.DoubleVar(value=0.0)
+        self._selected_holo_input_paths: list[Path] = []
+        self._synchronizing_holo_input_var = False
         self.minimal_status_var = tk.StringVar(value="Ready.")
         self.pipeline_library_summary_var = tk.StringVar(value="")
-        self.minimal_holo_input_path_var = tk.StringVar(value="No .holo input selected")
+        self.minimal_holo_input_path_var = tk.StringVar(value="No input selected")
         self.holo_hd_status_var = tk.StringVar(value="HD waiting")
         self.holo_dv_status_var = tk.StringVar(value="DV waiting")
         self.minimal_output_path_var = tk.StringVar(value=str(Path.cwd()))
@@ -317,7 +320,7 @@ class ProcessApp(_BaseAppTk):
         self._set_window_icon()
         self._build_ui()
         self._install_drop_targets()
-        self.batch_holo_input_var.trace_add("write", self._on_batch_paths_changed)
+        self.batch_holo_input_var.trace_add("write", self._on_holo_input_changed)
         self.batch_output_var.trace_add("write", self._on_batch_paths_changed)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._register_pipelines()
@@ -461,7 +464,7 @@ class ProcessApp(_BaseAppTk):
 
         self.minimal_holo_browse_button = ttk.Button(
             content,
-            text="Select reference .holo file",
+            text="Select .holo file(s)",
             command=self.choose_holo_file,
         )
         self.minimal_holo_browse_button.grid(row=2, column=0, pady=(0, 10))
@@ -650,7 +653,7 @@ class ProcessApp(_BaseAppTk):
         )
         self.batch_holo_input_entry.grid(row=0, column=1, sticky="ew", padx=(0, 4))
         self.batch_holo_browse_button = ttk.Button(
-            parent, text="Browse", command=self.choose_holo_file
+            parent, text="Select files", command=self.choose_holo_file
         )
         self.batch_holo_browse_button.grid(
             row=0,
@@ -906,6 +909,11 @@ class ProcessApp(_BaseAppTk):
         self._persist_trim_h5source()
         self.destroy()
 
+    def _on_holo_input_changed(self, *_args) -> None:
+        if not self._synchronizing_holo_input_var:
+            self._selected_holo_input_paths = []
+        self._update_minimal_path_labels()
+
     def _on_batch_paths_changed(self, *_args) -> None:
         self._update_minimal_path_labels()
 
@@ -928,15 +936,54 @@ class ProcessApp(_BaseAppTk):
             path = Path.cwd() / path
         return path
 
+    def _set_batch_holo_input_var(self, value: str) -> None:
+        self._synchronizing_holo_input_var = True
+        try:
+            self.batch_holo_input_var.set(value)
+        finally:
+            self._synchronizing_holo_input_var = False
+
+    def _selected_holo_paths(self) -> list[Path]:
+        if self._selected_holo_input_paths:
+            return list(self._selected_holo_input_paths)
+        single_path = self._path_from_var(self.batch_holo_input_var.get() or "")
+        return [single_path] if single_path is not None else []
+
     def _selected_holo_path(self) -> Path | None:
-        return self._path_from_var(self.batch_holo_input_var.get() or "")
+        selected_paths = self._selected_holo_paths()
+        if len(selected_paths) != 1:
+            return None
+        return selected_paths[0]
 
     def _assign_holo_input_path(self, input_path: Path) -> None:
-        normalized_path = input_path.expanduser()
-        if not normalized_path.is_absolute():
-            normalized_path = Path.cwd() / normalized_path
-        self.batch_holo_input_var.set(str(normalized_path))
-        self._apply_input_defaults(normalized_path)
+        self._assign_holo_input_paths([input_path])
+
+    def _assign_holo_input_paths(self, input_paths: Sequence[Path]) -> None:
+        normalized_paths: list[Path] = []
+        seen_paths: set[str] = set()
+        for input_path in input_paths:
+            normalized_path = input_path.expanduser()
+            if not normalized_path.is_absolute():
+                normalized_path = Path.cwd() / normalized_path
+            normalized_key = str(normalized_path).lower()
+            if normalized_key in seen_paths:
+                continue
+            seen_paths.add(normalized_key)
+            normalized_paths.append(normalized_path)
+
+        self._selected_holo_input_paths = normalized_paths
+        if not normalized_paths:
+            self._set_batch_holo_input_var("")
+            self._apply_input_defaults(None)
+            return
+
+        display_value = (
+            str(normalized_paths[0])
+            if len(normalized_paths) == 1
+            else f"{len(normalized_paths)} .holo files selected"
+        )
+        self._set_batch_holo_input_var(display_value)
+        self._apply_input_defaults(normalized_paths)
 
     @staticmethod
     def _list_h5_candidates(search_dir: Path) -> list[Path]:
@@ -981,20 +1028,32 @@ class ProcessApp(_BaseAppTk):
             f"Candidates:\n{candidate_list}"
         )
 
-    def _resolve_inputs_from_holo(self, holo_path: Path) -> _ResolvedBatchInputs:
+    def _resolve_inputs_from_holo(
+        self,
+        holo_path: Path,
+        *,
+        require_holo_file: bool = True,
+        relative_holo_path: Path | None = None,
+    ) -> _ResolvedBatchInputs:
         expanded_holo = holo_path.expanduser()
         if not expanded_holo.is_absolute():
             expanded_holo = Path.cwd() / expanded_holo
 
-        if not expanded_holo.exists():
-            raise FileNotFoundError(
-                f"{self._input_slot_label('holo')} input does not exist:\n{expanded_holo}"
-            )
-        if not expanded_holo.is_file() or expanded_holo.suffix.lower() != ".holo":
+        if expanded_holo.suffix.lower() != ".holo":
             raise ValueError(
                 f"{self._input_slot_label('holo')} input must be a .holo file:\n"
                 f"{expanded_holo}"
             )
+        if require_holo_file:
+            if not expanded_holo.exists():
+                raise FileNotFoundError(
+                    f"{self._input_slot_label('holo')} input does not exist:\n{expanded_holo}"
+                )
+            if not expanded_holo.is_file():
+                raise ValueError(
+                    f"{self._input_slot_label('holo')} input must be a .holo file:\n"
+                    f"{expanded_holo}"
+                )
 
         data_dir = expanded_holo.parent / expanded_holo.stem
         if not data_dir.is_dir():
@@ -1047,12 +1106,76 @@ class ProcessApp(_BaseAppTk):
 
         return _ResolvedBatchInputs(
             holo_path=expanded_holo,
+            relative_holo_path=relative_holo_path or Path(expanded_holo.name),
             data_dir=data_dir,
             hd_dir=hd_dir,
             dv_dir=dv_dir,
             hd_h5=hd_h5,
             dv_h5=dv_h5,
         )
+
+    def _batch_input_root(self, input_paths: Sequence[Path]) -> Path:
+        if not input_paths:
+            return Path.cwd()
+        if len(input_paths) == 1:
+            return input_paths[0].parent
+        try:
+            common_path = os.path.commonpath([str(path.parent) for path in input_paths])
+        except ValueError:
+            return Path.cwd()
+        return Path(common_path)
+
+    def _relative_holo_path_for_batch(self, holo_path: Path, batch_root: Path) -> Path:
+        try:
+            return holo_path.relative_to(batch_root)
+        except ValueError:
+            anchor = Path(holo_path.anchor)
+            drive_token = holo_path.drive.rstrip(":\\/") or "root"
+            tail = holo_path.relative_to(anchor) if anchor != holo_path else Path()
+            return Path(drive_token) / tail
+
+    def _resolve_selected_inputs(
+        self,
+        input_paths: Sequence[Path],
+    ) -> list[_ResolvedBatchInputs]:
+        normalized_inputs: list[Path] = []
+        for input_path in input_paths:
+            expanded_input = input_path.expanduser()
+            if not expanded_input.is_absolute():
+                expanded_input = Path.cwd() / expanded_input
+            normalized_inputs.append(expanded_input)
+
+        if not normalized_inputs:
+            raise ValueError("Select one or more .holo files.")
+
+        if len(normalized_inputs) == 1:
+            return [self._resolve_inputs_from_holo(normalized_inputs[0])]
+
+        batch_root = self._batch_input_root(normalized_inputs)
+        resolved_inputs: list[_ResolvedBatchInputs] = []
+        errors: list[str] = []
+
+        for input_path in normalized_inputs:
+            try:
+                resolved_inputs.append(
+                    self._resolve_inputs_from_holo(
+                        input_path,
+                        relative_holo_path=self._relative_holo_path_for_batch(
+                            input_path,
+                            batch_root,
+                        ),
+                    )
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                errors.append(f"{input_path}:\n{exc}")
+
+        if errors:
+            raise FileNotFoundError(
+                "Missing required input data for one or more selected .holo files:\n\n"
+                + "\n\n".join(errors)
+            )
+
+        return resolved_inputs
 
     def _handle_dropped_paths(
         self,
@@ -1073,11 +1196,13 @@ class ProcessApp(_BaseAppTk):
         if not valid_paths:
             return False
 
-        selected_path = valid_paths[0]
-        self._assign_holo_input_path(selected_path)
-        self._log_batch(
-            f"[INPUT] Drag and drop {self._input_slot_label('holo')} -> {selected_path}"
-        )
+        self._assign_holo_input_paths(valid_paths)
+        if len(valid_paths) == 1:
+            self._log_batch(f"[INPUT] Drag and drop HOLO -> {valid_paths[0]}")
+        else:
+            self._log_batch(
+                f"[INPUT] Drag and drop HOLO batch -> {len(valid_paths)} files"
+            )
         return True
 
     def _on_input_drop(self, event, *, slot_hint: str | None = None) -> None:
@@ -1093,7 +1218,7 @@ class ProcessApp(_BaseAppTk):
 
         messagebox.showwarning(
             "Unsupported drop",
-            "Drop a single .holo file into the input area.",
+            "Drop one or more .holo files into the input area.",
         )
 
     def _normalized_input_token(self, input_path: Path) -> str:
@@ -1101,25 +1226,39 @@ class ProcessApp(_BaseAppTk):
         return token or input_path.stem or "output"
 
     def _default_output_stem(self) -> str:
-        holo_path = self._selected_holo_path()
-        base_name = (
-            self._normalized_input_token(holo_path) if holo_path is not None else "output"
-        )
+        selected_paths = self._selected_holo_paths()
+        if not selected_paths:
+            base_name = "output"
+        elif len(selected_paths) == 1:
+            base_name = self._normalized_input_token(selected_paths[0])
+        else:
+            base_name = "batch"
         return f"{base_name}_eyeflow"
 
+    def _default_work_h5_name_for_input(self, input_path: Path | None) -> str:
+        base_name = (
+            self._normalized_input_token(input_path)
+            if input_path is not None
+            else "output"
+        )
+        return f"{base_name}_eyeflow.h5"
+
     def _default_work_h5_name(self) -> str:
-        return f"{self._default_output_stem()}.h5"
+        return self._default_work_h5_name_for_input(self._selected_holo_path())
 
     def _default_archive_name(self) -> str:
         return f"{self._default_output_stem()}.zip"
 
     def _default_output_artifact_name(self) -> str:
+        selected_inputs = self._selected_holo_paths()
+        if len(selected_inputs) > 1:
+            return "one *_eyeflow.h5 in each *_EF folder"
         if self.batch_zip_var.get():
             return self._default_archive_name()
         return self._default_work_h5_name()
 
     def _reference_holo_tooltip_text(self) -> str:
-        return "Pick a reference .holo file."
+        return "Pick one or more reference .holo files."
 
     def _set_holo_status_parts(
         self,
@@ -1141,32 +1280,27 @@ class ProcessApp(_BaseAppTk):
             if label is not None:
                 label.configure(fg=color)
 
-    def _update_minimal_found_statuses(self, holo_path: Path | None) -> None:
-        if holo_path is None:
-            self._set_holo_status_parts(
-                hd_text="HD waiting",
-                hd_color=self._muted_fg,
-                dv_text="DV waiting",
-                dv_color=self._muted_fg,
-            )
-            return
-
+    def _probe_holo_data_status(
+        self,
+        holo_path: Path,
+        *,
+        require_holo_file: bool,
+    ) -> tuple[bool, bool]:
         normalized_holo = holo_path.expanduser()
         if not normalized_holo.is_absolute():
             normalized_holo = Path.cwd() / normalized_holo
 
         if (
-            not normalized_holo.exists()
-            or not normalized_holo.is_file()
-            or normalized_holo.suffix.lower() != ".holo"
-        ):
-            self._set_holo_status_parts(
-                hd_text="HD unavailable",
-                hd_color=self._error_color,
-                dv_text="DV unavailable",
-                dv_color=self._error_color,
+            normalized_holo.suffix.lower() != ".holo"
+            or (
+                require_holo_file
+                and (
+                    not normalized_holo.exists()
+                    or not normalized_holo.is_file()
+                )
             )
-            return
+        ):
+            return False, False
 
         data_dir = normalized_holo.parent / normalized_holo.stem
         hd_dir = data_dir / f"{normalized_holo.stem}_HD"
@@ -1201,11 +1335,91 @@ class ProcessApp(_BaseAppTk):
             else:
                 dv_found = True
 
+        return hd_found, dv_found
+
+    def _update_minimal_found_statuses(self, holo_paths: Sequence[Path]) -> None:
+        if not holo_paths:
+            self._set_holo_status_parts(
+                hd_text="HD waiting",
+                hd_color=self._muted_fg,
+                dv_text="DV waiting",
+                dv_color=self._muted_fg,
+            )
+            return
+
+        if len(holo_paths) == 1:
+            normalized_holo = holo_paths[0].expanduser()
+            if not normalized_holo.is_absolute():
+                normalized_holo = Path.cwd() / normalized_holo
+
+            if (
+                not normalized_holo.exists()
+                or not normalized_holo.is_file()
+                or normalized_holo.suffix.lower() != ".holo"
+            ):
+                self._set_holo_status_parts(
+                    hd_text="HD unavailable",
+                    hd_color=self._error_color,
+                    dv_text="DV unavailable",
+                    dv_color=self._error_color,
+                )
+                return
+
+            hd_found, dv_found = self._probe_holo_data_status(
+                normalized_holo,
+                require_holo_file=True,
+            )
+
+            self._set_holo_status_parts(
+                hd_text="HD found" if hd_found else "HD not found",
+                hd_color=self._success_color if hd_found else self._error_color,
+                dv_text="DV found" if dv_found else "DV not found",
+                dv_color=self._success_color if dv_found else self._error_color,
+            )
+            return
+
+        normalized_paths: list[Path] = []
+        for holo_path in holo_paths:
+            normalized_holo = holo_path.expanduser()
+            if not normalized_holo.is_absolute():
+                normalized_holo = Path.cwd() / normalized_holo
+            if normalized_holo.suffix.lower() != ".holo":
+                continue
+            normalized_paths.append(normalized_holo)
+
+        if not normalized_paths:
+            self._set_holo_status_parts(
+                hd_text="HD unavailable",
+                hd_color=self._error_color,
+                dv_text="DV unavailable",
+                dv_color=self._error_color,
+            )
+            return
+
+        total_entries = len(normalized_paths)
+        hd_found_count = 0
+        dv_found_count = 0
+        for normalized_holo in normalized_paths:
+            hd_found, dv_found = self._probe_holo_data_status(
+                normalized_holo,
+                require_holo_file=True,
+            )
+            hd_found_count += int(hd_found)
+            dv_found_count += int(dv_found)
+
         self._set_holo_status_parts(
-            hd_text="HD found" if hd_found else "HD not found",
-            hd_color=self._success_color if hd_found else self._error_color,
-            dv_text="DV found" if dv_found else "DV not found",
-            dv_color=self._success_color if dv_found else self._error_color,
+            hd_text=f"HD {hd_found_count}/{total_entries} found",
+            hd_color=(
+                self._success_color
+                if hd_found_count == total_entries
+                else self._error_color
+            ),
+            dv_text=f"DV {dv_found_count}/{total_entries} found",
+            dv_color=(
+                self._success_color
+                if dv_found_count == total_entries
+                else self._error_color
+            ),
         )
 
     def _next_available_output_path(self, output_path: Path) -> Path:
@@ -1222,13 +1436,22 @@ class ProcessApp(_BaseAppTk):
         return candidate
 
     def _update_minimal_path_labels(self) -> None:
-        holo_path = self._selected_holo_path()
-        self.minimal_holo_input_path_var.set(
-            str(holo_path) if holo_path is not None else "No .holo input selected"
-        )
-        self._update_minimal_found_statuses(holo_path)
-        if holo_path is None:
+        holo_paths = self._selected_holo_paths()
+        if not holo_paths:
+            self.minimal_holo_input_path_var.set("No input selected")
+        elif len(holo_paths) == 1:
+            self.minimal_holo_input_path_var.set(str(holo_paths[0]))
+        else:
+            self.minimal_holo_input_path_var.set(
+                f"{len(holo_paths)} .holo files selected"
+            )
+        self._update_minimal_found_statuses(holo_paths)
+        if not holo_paths:
             self.minimal_output_name_var.set("Output name: -")
+        elif len(holo_paths) > 1:
+            self.minimal_output_name_var.set(
+                "Output: one *_eyeflow.h5 in each *_EF folder"
+            )
         else:
             self.minimal_output_name_var.set(
                 f"Output name: {self._default_output_artifact_name()}"
@@ -1303,15 +1526,37 @@ class ProcessApp(_BaseAppTk):
             output_dir = input_path.parent / input_path.stem / f"{input_path.stem}_EF"
         return output_dir
 
+    def _default_output_dir_for_inputs(self, input_paths: Sequence[Path]) -> Path:
+        if not input_paths:
+            return Path.cwd()
+        if len(input_paths) == 1:
+            return self._default_output_dir_for_input(input_paths[0])
+        return self._batch_input_root(input_paths)
+
+    def _batch_output_dir_for_resolved_input(
+        self,
+        base_output_dir: Path,
+        resolved_input: _ResolvedBatchInputs,
+    ) -> Path:
+        stem = resolved_input.holo_path.stem
+        return (
+            base_output_dir
+            / resolved_input.relative_holo_path.parent
+            / stem
+            / f"{stem}_EF"
+        )
+
     def _replace_existing_output_dir_if_needed(
         self,
         base_output_dir: Path,
         *,
         holo_path: Path,
+        force_replace: bool = False,
     ) -> bool:
-        expected_output_dir = self._default_output_dir_for_input(holo_path)
-        if base_output_dir.resolve() != expected_output_dir.resolve():
-            return False
+        if not force_replace:
+            expected_output_dir = self._default_output_dir_for_input(holo_path)
+            if base_output_dir.resolve() != expected_output_dir.resolve():
+                return False
         if not base_output_dir.exists():
             return False
         if base_output_dir.is_dir():
@@ -1320,8 +1565,13 @@ class ProcessApp(_BaseAppTk):
             base_output_dir.unlink()
         return True
 
-    def _apply_input_defaults(self, input_path: Path) -> None:
-        output_dir = self._default_output_dir_for_input(input_path)
+    def _apply_input_defaults(self, input_path: Path | Sequence[Path] | None) -> None:
+        if input_path is None:
+            output_dir = Path.cwd()
+        elif isinstance(input_path, Path):
+            output_dir = self._default_output_dir_for_input(input_path)
+        else:
+            output_dir = self._default_output_dir_for_inputs(input_path)
         self.batch_output_var.set(str(output_dir))
         self.batch_zip_name_var.set(self._default_archive_name())
         self._reset_progress()
@@ -1329,6 +1579,8 @@ class ProcessApp(_BaseAppTk):
 
     def _minimal_output_filename_for_run(self) -> str | None:
         if self.ui_mode != "minimal":
+            return None
+        if len(self._selected_holo_paths()) != 1:
             return None
         if self.batch_zip_var.get():
             return None
@@ -1866,7 +2118,7 @@ class ProcessApp(_BaseAppTk):
     def _reset_batch_output(
         self,
         message: str = (
-            "Select a .holo file and output path, choose pipelines in Pipeline Library, "
+            "Select one or more .holo files and output path, "
             "then run."
         ),
     ) -> None:
@@ -1897,19 +2149,20 @@ class ProcessApp(_BaseAppTk):
         )
 
     def choose_holo_file(self) -> None:
-        selected_holo = self._selected_holo_path()
+        selected_paths = self._selected_holo_paths()
+        selected_holo = selected_paths[0] if selected_paths else None
         initial_dir = (
             str(selected_holo.parent)
             if selected_holo is not None
             else os.path.abspath("example_file")
         )
-        path = filedialog.askopenfilename(
+        paths = filedialog.askopenfilenames(
             filetypes=[("HOLO", "*.holo"), ("All files", "*.*")],
             initialdir=initial_dir,
-            title="Select reference .holo file",
+            title="Select .holo file(s)",
         )
-        if path:
-            self._assign_holo_input_path(Path(path))
+        if paths:
+            self._assign_holo_input_paths([Path(path) for path in paths])
 
     def choose_batch_output(self) -> None:
         path = filedialog.askdirectory(
@@ -1921,17 +2174,17 @@ class ProcessApp(_BaseAppTk):
 
     def _validate_selected_inputs(
         self,
-        holo_path: Path | None,
-    ) -> _ResolvedBatchInputs | None:
-        if holo_path is None:
+        holo_paths: Sequence[Path],
+    ) -> list[_ResolvedBatchInputs] | None:
+        if not holo_paths:
             messagebox.showwarning(
                 "Missing input",
-                "Select a .holo file.",
+                "Select one or more .holo files.",
             )
             return None
 
         try:
-            return self._resolve_inputs_from_holo(holo_path)
+            return self._resolve_selected_inputs(holo_paths)
         except ValueError as exc:
             messagebox.showerror("Invalid input", str(exc))
             return None
@@ -1941,7 +2194,7 @@ class ProcessApp(_BaseAppTk):
 
     def run_batch(self) -> None:
         self._reset_progress()
-        holo_path = self._selected_holo_path()
+        holo_paths = self._selected_holo_paths()
 
         selected_names = [
             pipeline.name
@@ -1969,8 +2222,15 @@ class ProcessApp(_BaseAppTk):
             )
             return
 
-        resolved_inputs = self._validate_selected_inputs(holo_path)
+        resolved_inputs = self._validate_selected_inputs(holo_paths)
         if resolved_inputs is None:
+            return
+        is_batch_input = len(resolved_inputs) > 1
+        if is_batch_input and self.batch_zip_var.get():
+            messagebox.showwarning(
+                "Unsupported output",
+                "ZIP output is not available when multiple .holo files are selected.",
+            )
             return
 
         base_output_value = (self.batch_output_var.get() or "").strip()
@@ -1981,15 +2241,76 @@ class ProcessApp(_BaseAppTk):
             base_output_dir = Path.cwd() / base_output_dir
 
         self._reset_batch_output("Starting pipeline run...\n")
-        self._log_batch(f"[INPUT] HOLO -> {resolved_inputs.holo_path}")
-        self._log_batch(f"[INPUT] DATA DIR -> {resolved_inputs.data_dir}")
-        self._log_batch(f"[RESOLVED] HD -> {resolved_inputs.hd_h5}")
-        self._log_batch(f"[RESOLVED] DV -> {resolved_inputs.dv_h5}")
+        if is_batch_input:
+            self._log_batch(f"[INPUT] HOLO batch -> {len(resolved_inputs)} files")
+            self._log_batch(f"[OUTPUT ROOT] -> {base_output_dir}")
+            base_output_dir.mkdir(parents=True, exist_ok=True)
+            self._start_progress(
+                len(pipelines) * len(resolved_inputs),
+                style_name=self._progress_primary_style,
+                status_text="Running pipelines...",
+            )
+
+            completed_outputs: list[Path] = []
+            for index, resolved_input in enumerate(resolved_inputs, start=1):
+                item_prefix = f"[ITEM {index}/{len(resolved_inputs)}]"
+                item_output_dir = self._batch_output_dir_for_resolved_input(
+                    base_output_dir,
+                    resolved_input,
+                )
+                self._log_batch(f"{item_prefix} HOLO -> {resolved_input.holo_path}")
+                self._log_batch(f"{item_prefix} DATA DIR -> {resolved_input.data_dir}")
+                self._log_batch(f"{item_prefix} HD -> {resolved_input.hd_h5}")
+                self._log_batch(f"{item_prefix} DV -> {resolved_input.dv_h5}")
+                if self._replace_existing_output_dir_if_needed(
+                    item_output_dir,
+                    holo_path=resolved_input.holo_path,
+                    force_replace=True,
+                ):
+                    self._log_batch(
+                        f"{item_prefix} Replaced existing output directory: "
+                        f"{item_output_dir}"
+                    )
+                item_output_dir.mkdir(parents=True, exist_ok=True)
+                output_h5_path = (
+                    item_output_dir
+                    / self._default_work_h5_name_for_input(resolved_input.holo_path)
+                )
+                self._log_batch(f"{item_prefix} OUTPUT -> {output_h5_path}")
+                try:
+                    self._run_pipelines_to_output(
+                        output_h5_path=output_h5_path,
+                        pipelines=pipelines,
+                        holodoppler_h5=resolved_input.hd_h5,
+                        doppler_vision_h5=resolved_input.dv_h5,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failure_message = f"{resolved_input.holo_path.name}: {exc}"
+                    self._log_batch(f"[FAIL] {failure_message}")
+                    self._set_minimal_status("Run failed.")
+                    messagebox.showerror("Run failed", failure_message)
+                    return
+                completed_outputs.append(output_h5_path)
+
+            self._set_progress_units(self._progress_total_units)
+            self._log_batch(
+                f"Completed. Created {len(completed_outputs)} output file(s)."
+            )
+            self._set_minimal_status("Process ended.")
+            return
+
+        resolved_input = resolved_inputs[0]
+        self._log_batch(f"[INPUT] HOLO -> {resolved_input.holo_path}")
+        self._log_batch(f"[INPUT] DATA DIR -> {resolved_input.data_dir}")
+        self._log_batch(f"[RESOLVED] HD -> {resolved_input.hd_h5}")
+        self._log_batch(f"[RESOLVED] DV -> {resolved_input.dv_h5}")
         if self._replace_existing_output_dir_if_needed(
             base_output_dir,
-            holo_path=resolved_inputs.holo_path,
+            holo_path=resolved_input.holo_path,
         ):
-            self._log_batch(f"[OUTPUT] Replaced existing output directory: {base_output_dir}")
+            self._log_batch(
+                f"[OUTPUT] Replaced existing output directory: {base_output_dir}"
+            )
         base_output_dir.mkdir(parents=True, exist_ok=True)
 
         self._start_progress(
@@ -2008,7 +2329,7 @@ class ProcessApp(_BaseAppTk):
             else:
                 output_name = (
                     self._minimal_output_filename_for_run()
-                    or self._default_work_h5_name()
+                    or self._default_work_h5_name_for_input(resolved_input.holo_path)
                 )
                 output_h5_path = self._next_available_output_path(
                     base_output_dir / output_name
@@ -2020,8 +2341,8 @@ class ProcessApp(_BaseAppTk):
                 self._run_pipelines_to_output(
                     output_h5_path=output_h5_path,
                     pipelines=pipelines,
-                    holodoppler_h5=resolved_inputs.hd_h5,
-                    doppler_vision_h5=resolved_inputs.dv_h5,
+                    holodoppler_h5=resolved_input.hd_h5,
+                    doppler_vision_h5=resolved_input.dv_h5,
                 )
             except Exception as exc:  # noqa: BLE001
                 failure_message = str(exc)

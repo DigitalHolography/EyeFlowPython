@@ -9,14 +9,10 @@ import tempfile
 import time
 import tkinter as tk
 import tkinter.font as tkfont
-import zipfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-
-import h5py
 
 from app_settings import (
     LAST_BATCH_LOG_FILENAME,
@@ -38,7 +34,18 @@ except ImportError:  #  optional dependency
 
 from pipelines import PipelineDescriptor, load_pipeline_catalog
 from pipelines.core.errors import format_pipeline_exception
-from utils.io import append_result_group, initialize_output_h5
+from utils.io import (
+    HOLO_SUFFIX,
+    PipelineInputView,
+    ResolvedHoloInput,
+    append_result_group,
+    create_zip_from_tree,
+    holo_input_status,
+    initialize_output_h5,
+    open_h5,
+    reset_output_dir,
+    resolve_selected_holo_inputs,
+)
 
 _BaseAppTk = TkinterDnD.Tk if TkinterDnD is not None else tk.Tk
 
@@ -96,179 +103,6 @@ class _Tooltip:
         if self.tipwindow:
             self.tipwindow.destroy()
             self.tipwindow = None
-
-
-def _normalize_h5_lookup_path(path: str) -> str:
-    return str(path).replace("\\", "/").strip("/")
-
-
-class _MergedAttrs(Mapping[str, object]):
-    def __init__(self, *sources: h5py.File | None) -> None:
-        self._sources = [source for source in sources if source is not None]
-
-    def __getitem__(self, key: str) -> object:
-        sentinel = object()
-        value = self.get(key, sentinel)
-        if value is sentinel:
-            raise KeyError(key)
-        return value
-
-    def __iter__(self) -> Iterator[str]:
-        seen: set[str] = set()
-        for source in self._sources:
-            for key in source.attrs.keys():
-                if key not in seen:
-                    seen.add(key)
-                    yield str(key)
-
-    def __len__(self) -> int:
-        return sum(1 for _ in self.__iter__())
-
-    def get(self, key: str, default=None):
-        for source in self._sources:
-            if key in source.attrs:
-                return source.attrs[key]
-        return default
-
-
-class _EyeFlowView:
-    def __init__(self, work_h5: h5py.File) -> None:
-        self.work_h5 = work_h5
-
-    def _pipeline_group_names(self) -> list[str]:
-        eye_flow_group = self.work_h5.get("EyeFlow")
-        if not isinstance(eye_flow_group, h5py.Group):
-            return []
-        return list(eye_flow_group.keys())
-
-    def get(self, key: str, default=None):
-        normalized_key = _normalize_h5_lookup_path(key)
-        if not normalized_key:
-            return default
-
-        explicit = self.work_h5.get(f"EyeFlow/{normalized_key}")
-        if explicit is not None:
-            return explicit
-
-        for pipeline_group_name in reversed(self._pipeline_group_names()):
-            candidate = self.work_h5.get(
-                f"EyeFlow/{pipeline_group_name}/{normalized_key}"
-            )
-            if candidate is not None:
-                return candidate
-        return default
-
-    def __getitem__(self, key: str):
-        found = self.get(key)
-        if found is None:
-            raise KeyError(key)
-        return found
-
-    def __contains__(self, key: object) -> bool:
-        if not isinstance(key, str):
-            return False
-        return self.get(key) is not None
-
-
-@dataclass(frozen=True)
-class _ResolvedBatchInputs:
-    holo_path: Path
-    relative_holo_path: Path
-    data_dir: Path
-    hd_dir: Path
-    dv_dir: Path
-    hd_h5: Path
-    dv_h5: Path
-
-
-class _PipelineInputView:
-    def __init__(
-        self,
-        *,
-        work_h5: h5py.File,
-        holodoppler_h5: h5py.File | None = None,
-        doppler_vision_h5: h5py.File | None = None,
-        preferred_input: str = "both",
-    ) -> None:
-        self.work_h5 = work_h5
-        self.hd_h5 = holodoppler_h5
-        self.dv_h5 = doppler_vision_h5
-        self.work = work_h5
-        self.hd = holodoppler_h5
-        self.dv = doppler_vision_h5
-        self.ef = _EyeFlowView(work_h5)
-        self.preferred_input = preferred_input
-        self.attrs = _MergedAttrs(
-            self.work_h5,
-            self._preferred_raw_source(),
-            self._secondary_raw_source(),
-        )
-
-    def _preferred_raw_source(self) -> h5py.File | None:
-        if self.preferred_input == "dv":
-            return self.dv_h5 or self.hd_h5
-        return self.hd_h5 or self.dv_h5
-
-    def _secondary_raw_source(self) -> h5py.File | None:
-        preferred = self._preferred_raw_source()
-        if preferred is self.hd_h5:
-            return self.dv_h5
-        if preferred is self.dv_h5:
-            return self.hd_h5
-        return None
-
-    @property
-    def filename(self) -> str:
-        primary = self._preferred_raw_source()
-        if primary is not None and primary.filename is not None:
-            return str(primary.filename)
-        if self.work_h5.filename is not None:
-            return str(self.work_h5.filename)
-        return ""
-
-    def _lookup_in_source(self, source: h5py.File | None, key: str):
-        if source is None:
-            return None
-
-        direct = source.get(key)
-        if direct is not None:
-            return direct
-
-        eye_flow_group = source.get("EyeFlow")
-        if not isinstance(eye_flow_group, h5py.Group):
-            return None
-
-        for pipeline_group_name in reversed(list(eye_flow_group.keys())):
-            candidate = source.get(f"EyeFlow/{pipeline_group_name}/{key}")
-            if candidate is not None:
-                return candidate
-        return None
-
-    def get(self, key: str, default=None):
-        normalized_key = _normalize_h5_lookup_path(key)
-        if not normalized_key:
-            return default
-
-        for source in (
-            self.work_h5,
-            self._preferred_raw_source(),
-            self._secondary_raw_source(),
-        ):
-            found = self._lookup_in_source(source, normalized_key)
-            if found is not None:
-                return found
-        return default
-
-    def __getitem__(self, key: str):
-        found = self.get(key)
-        if found is None:
-            raise KeyError(key)
-        return found
-
-    def __contains__(self, key: object) -> bool:
-        if not isinstance(key, str):
-            return False
-        return self.get(key) is not None
 
 
 class ProcessApp(_BaseAppTk):
@@ -917,16 +751,6 @@ class ProcessApp(_BaseAppTk):
     def _on_batch_paths_changed(self, *_args) -> None:
         self._update_minimal_path_labels()
 
-    @staticmethod
-    def _input_slot_label(slot: str) -> str:
-        return {
-            "holo": "HOLO",
-            "hd": "HD",
-            "dv": "DV",
-            "both": "HD + DV",
-            "work": "Work",
-        }.get(slot, slot.upper())
-
     def _path_from_var(self, raw_value: str) -> Path | None:
         value = raw_value.strip()
         if not value:
@@ -985,198 +809,6 @@ class ProcessApp(_BaseAppTk):
         self._set_batch_holo_input_var(display_value)
         self._apply_input_defaults(normalized_paths)
 
-    @staticmethod
-    def _list_h5_candidates(search_dir: Path) -> list[Path]:
-        if not search_dir.is_dir():
-            return []
-        return sorted(
-            (
-                candidate
-                for candidate in search_dir.iterdir()
-                if candidate.is_file() and candidate.suffix.lower() in {".h5", ".hdf5"}
-            ),
-            key=lambda path: path.name.lower(),
-        )
-
-    def _resolve_h5_in_directory(
-        self,
-        search_dir: Path,
-        *,
-        slot: str,
-        preferred_name: str,
-    ) -> Path:
-        candidates = self._list_h5_candidates(search_dir)
-        if not candidates:
-            raise FileNotFoundError(
-                f"Could not find a {self._input_slot_label(slot)} .h5/.hdf5 file in:\n"
-                f"{search_dir}"
-            )
-
-        preferred_name_lower = preferred_name.lower()
-        for candidate in candidates:
-            if candidate.name.lower() == preferred_name_lower:
-                return candidate
-
-        if len(candidates) == 1:
-            return candidates[0]
-
-        candidate_list = "\n".join(str(candidate) for candidate in candidates)
-        raise FileNotFoundError(
-            f"Found multiple {self._input_slot_label(slot)} .h5/.hdf5 files in:\n"
-            f"{search_dir}\n\n"
-            f"Expected a single file there or a file named:\n{preferred_name}\n\n"
-            f"Candidates:\n{candidate_list}"
-        )
-
-    def _resolve_inputs_from_holo(
-        self,
-        holo_path: Path,
-        *,
-        require_holo_file: bool = True,
-        relative_holo_path: Path | None = None,
-    ) -> _ResolvedBatchInputs:
-        expanded_holo = holo_path.expanduser()
-        if not expanded_holo.is_absolute():
-            expanded_holo = Path.cwd() / expanded_holo
-
-        if expanded_holo.suffix.lower() != ".holo":
-            raise ValueError(
-                f"{self._input_slot_label('holo')} input must be a .holo file:\n"
-                f"{expanded_holo}"
-            )
-        if require_holo_file:
-            if not expanded_holo.exists():
-                raise FileNotFoundError(
-                    f"{self._input_slot_label('holo')} input does not exist:\n{expanded_holo}"
-                )
-            if not expanded_holo.is_file():
-                raise ValueError(
-                    f"{self._input_slot_label('holo')} input must be a .holo file:\n"
-                    f"{expanded_holo}"
-                )
-
-        data_dir = expanded_holo.parent / expanded_holo.stem
-        if not data_dir.is_dir():
-            raise FileNotFoundError(
-                "Could not find the data folder matching the selected .holo file:\n"
-                f"{data_dir}"
-            )
-
-        hd_dir = data_dir / f"{expanded_holo.stem}_HD"
-        dv_dir = data_dir / f"{expanded_holo.stem}_DV"
-        hd_raw_dir = hd_dir / "raw"
-        dv_h5_dir = dv_dir / "h5"
-        hd_h5: Path | None = None
-        dv_h5: Path | None = None
-        missing_items: list[str] = []
-
-        if not hd_dir.is_dir():
-            missing_items.append(f"HD folder missing:\n{hd_dir}")
-        elif not hd_raw_dir.is_dir():
-            missing_items.append(f"HD raw folder missing:\n{hd_raw_dir}")
-        else:
-            try:
-                hd_h5 = self._resolve_h5_in_directory(
-                    hd_raw_dir,
-                    slot="hd",
-                    preferred_name=f"{hd_dir.name}_output.h5",
-                )
-            except FileNotFoundError as exc:
-                missing_items.append(str(exc))
-
-        if not dv_dir.is_dir():
-            missing_items.append(f"DV folder missing:\n{dv_dir}")
-        elif not dv_h5_dir.is_dir():
-            missing_items.append(f"DV h5 folder missing:\n{dv_h5_dir}")
-        else:
-            try:
-                dv_h5 = self._resolve_h5_in_directory(
-                    dv_h5_dir,
-                    slot="dv",
-                    preferred_name=f"{dv_dir.name}.h5",
-                )
-            except FileNotFoundError as exc:
-                missing_items.append(str(exc))
-
-        if missing_items or hd_h5 is None or dv_h5 is None:
-            raise FileNotFoundError(
-                "Missing required input data for the selected .holo file:\n\n"
-                + "\n\n".join(missing_items)
-            )
-
-        return _ResolvedBatchInputs(
-            holo_path=expanded_holo,
-            relative_holo_path=relative_holo_path or Path(expanded_holo.name),
-            data_dir=data_dir,
-            hd_dir=hd_dir,
-            dv_dir=dv_dir,
-            hd_h5=hd_h5,
-            dv_h5=dv_h5,
-        )
-
-    def _batch_input_root(self, input_paths: Sequence[Path]) -> Path:
-        if not input_paths:
-            return Path.cwd()
-        if len(input_paths) == 1:
-            return input_paths[0].parent
-        try:
-            common_path = os.path.commonpath([str(path.parent) for path in input_paths])
-        except ValueError:
-            return Path.cwd()
-        return Path(common_path)
-
-    def _relative_holo_path_for_batch(self, holo_path: Path, batch_root: Path) -> Path:
-        try:
-            return holo_path.relative_to(batch_root)
-        except ValueError:
-            anchor = Path(holo_path.anchor)
-            drive_token = holo_path.drive.rstrip(":\\/") or "root"
-            tail = holo_path.relative_to(anchor) if anchor != holo_path else Path()
-            return Path(drive_token) / tail
-
-    def _resolve_selected_inputs(
-        self,
-        input_paths: Sequence[Path],
-    ) -> list[_ResolvedBatchInputs]:
-        normalized_inputs: list[Path] = []
-        for input_path in input_paths:
-            expanded_input = input_path.expanduser()
-            if not expanded_input.is_absolute():
-                expanded_input = Path.cwd() / expanded_input
-            normalized_inputs.append(expanded_input)
-
-        if not normalized_inputs:
-            raise ValueError("Select one or more .holo files.")
-
-        if len(normalized_inputs) == 1:
-            return [self._resolve_inputs_from_holo(normalized_inputs[0])]
-
-        batch_root = self._batch_input_root(normalized_inputs)
-        resolved_inputs: list[_ResolvedBatchInputs] = []
-        errors: list[str] = []
-
-        for input_path in normalized_inputs:
-            try:
-                resolved_inputs.append(
-                    self._resolve_inputs_from_holo(
-                        input_path,
-                        relative_holo_path=self._relative_holo_path_for_batch(
-                            input_path,
-                            batch_root,
-                        ),
-                    )
-                )
-            except (FileNotFoundError, ValueError) as exc:
-                errors.append(f"{input_path}:\n{exc}")
-
-        if errors:
-            raise FileNotFoundError(
-                "Missing required input data for one or more selected .holo files:\n\n"
-                + "\n\n".join(errors)
-            )
-
-        return resolved_inputs
-
     def _handle_dropped_paths(
         self,
         dropped_paths: Sequence[Path],
@@ -1190,7 +822,7 @@ class ProcessApp(_BaseAppTk):
             if not cleaned:
                 continue
             candidate = Path(cleaned).expanduser()
-            if candidate.is_file() and candidate.suffix.lower() == ".holo":
+            if candidate.is_file() and candidate.suffix.lower() == HOLO_SUFFIX:
                 valid_paths.append(candidate)
 
         if not valid_paths:
@@ -1280,62 +912,16 @@ class ProcessApp(_BaseAppTk):
             if label is not None:
                 label.configure(fg=color)
 
-    def _probe_holo_data_status(
+    def _holo_data_status(
         self,
         holo_path: Path,
         *,
         require_holo_file: bool,
-    ) -> tuple[bool, bool]:
-        normalized_holo = holo_path.expanduser()
-        if not normalized_holo.is_absolute():
-            normalized_holo = Path.cwd() / normalized_holo
-
-        if (
-            normalized_holo.suffix.lower() != ".holo"
-            or (
-                require_holo_file
-                and (
-                    not normalized_holo.exists()
-                    or not normalized_holo.is_file()
-                )
-            )
-        ):
-            return False, False
-
-        data_dir = normalized_holo.parent / normalized_holo.stem
-        hd_dir = data_dir / f"{normalized_holo.stem}_HD"
-        dv_dir = data_dir / f"{normalized_holo.stem}_DV"
-        hd_raw_dir = hd_dir / "raw"
-        dv_h5_dir = dv_dir / "h5"
-
-        hd_found = False
-        dv_found = False
-
-        if hd_raw_dir.is_dir():
-            try:
-                self._resolve_h5_in_directory(
-                    hd_raw_dir,
-                    slot="hd",
-                    preferred_name=f"{hd_dir.name}_output.h5",
-                )
-            except FileNotFoundError:
-                pass
-            else:
-                hd_found = True
-
-        if dv_h5_dir.is_dir():
-            try:
-                self._resolve_h5_in_directory(
-                    dv_h5_dir,
-                    slot="dv",
-                    preferred_name=f"{dv_dir.name}.h5",
-                )
-            except FileNotFoundError:
-                pass
-            else:
-                dv_found = True
-
-        return hd_found, dv_found
+    ):
+        return holo_input_status(
+            holo_path,
+            require_holo_file=require_holo_file,
+        )
 
     def _update_minimal_found_statuses(self, holo_paths: Sequence[Path]) -> None:
         if not holo_paths:
@@ -1355,7 +941,7 @@ class ProcessApp(_BaseAppTk):
             if (
                 not normalized_holo.exists()
                 or not normalized_holo.is_file()
-                or normalized_holo.suffix.lower() != ".holo"
+                or normalized_holo.suffix.lower() != HOLO_SUFFIX
             ):
                 self._set_holo_status_parts(
                     hd_text="HD unavailable",
@@ -1365,16 +951,16 @@ class ProcessApp(_BaseAppTk):
                 )
                 return
 
-            hd_found, dv_found = self._probe_holo_data_status(
+            status = self._holo_data_status(
                 normalized_holo,
                 require_holo_file=True,
             )
 
             self._set_holo_status_parts(
-                hd_text="HD found" if hd_found else "HD not found",
-                hd_color=self._success_color if hd_found else self._error_color,
-                dv_text="DV found" if dv_found else "DV not found",
-                dv_color=self._success_color if dv_found else self._error_color,
+                hd_text="HD found" if status.hd else "HD not found",
+                hd_color=self._success_color if status.hd else self._error_color,
+                dv_text="DV found" if status.dv else "DV not found",
+                dv_color=self._success_color if status.dv else self._error_color,
             )
             return
 
@@ -1383,7 +969,7 @@ class ProcessApp(_BaseAppTk):
             normalized_holo = holo_path.expanduser()
             if not normalized_holo.is_absolute():
                 normalized_holo = Path.cwd() / normalized_holo
-            if normalized_holo.suffix.lower() != ".holo":
+            if normalized_holo.suffix.lower() != HOLO_SUFFIX:
                 continue
             normalized_paths.append(normalized_holo)
 
@@ -1400,12 +986,12 @@ class ProcessApp(_BaseAppTk):
         hd_found_count = 0
         dv_found_count = 0
         for normalized_holo in normalized_paths:
-            hd_found, dv_found = self._probe_holo_data_status(
+            status = self._holo_data_status(
                 normalized_holo,
                 require_holo_file=True,
             )
-            hd_found_count += int(hd_found)
-            dv_found_count += int(dv_found)
+            hd_found_count += int(status.hd)
+            dv_found_count += int(status.dv)
 
         self._set_holo_status_parts(
             hd_text=f"HD {hd_found_count}/{total_entries} found",
@@ -1522,7 +1108,7 @@ class ProcessApp(_BaseAppTk):
 
     def _default_output_dir_for_input(self, input_path: Path) -> Path:
         output_dir = input_path.parent if input_path.is_file() else input_path
-        if input_path.is_file() and input_path.suffix.lower() == ".holo":
+        if input_path.is_file() and input_path.suffix.lower() == HOLO_SUFFIX:
             output_dir = input_path.parent / input_path.stem / f"{input_path.stem}_EF"
         return output_dir
 
@@ -1531,12 +1117,15 @@ class ProcessApp(_BaseAppTk):
             return Path.cwd()
         if len(input_paths) == 1:
             return self._default_output_dir_for_input(input_paths[0])
-        return self._batch_input_root(input_paths)
+        try:
+            return Path(os.path.commonpath([str(path.parent) for path in input_paths]))
+        except ValueError:
+            return Path.cwd()
 
     def _batch_output_dir_for_resolved_input(
         self,
         base_output_dir: Path,
-        resolved_input: _ResolvedBatchInputs,
+        resolved_input: ResolvedHoloInput,
     ) -> Path:
         stem = resolved_input.holo_path.stem
         return (
@@ -1560,7 +1149,7 @@ class ProcessApp(_BaseAppTk):
         if not base_output_dir.exists():
             return False
         if base_output_dir.is_dir():
-            shutil.rmtree(base_output_dir)
+            reset_output_dir(base_output_dir)
         else:
             base_output_dir.unlink()
         return True
@@ -2175,7 +1764,7 @@ class ProcessApp(_BaseAppTk):
     def _validate_selected_inputs(
         self,
         holo_paths: Sequence[Path],
-    ) -> list[_ResolvedBatchInputs] | None:
+    ) -> list[ResolvedHoloInput] | None:
         if not holo_paths:
             messagebox.showwarning(
                 "Missing input",
@@ -2184,7 +1773,7 @@ class ProcessApp(_BaseAppTk):
             return None
 
         try:
-            return self._resolve_selected_inputs(holo_paths)
+            return resolve_selected_holo_inputs(holo_paths)
         except ValueError as exc:
             messagebox.showerror("Invalid input", str(exc))
             return None
@@ -2262,11 +1851,18 @@ class ProcessApp(_BaseAppTk):
                 self._log_batch(f"{item_prefix} DATA DIR -> {resolved_input.data_dir}")
                 self._log_batch(f"{item_prefix} HD -> {resolved_input.hd_h5}")
                 self._log_batch(f"{item_prefix} DV -> {resolved_input.dv_h5}")
-                if self._replace_existing_output_dir_if_needed(
-                    item_output_dir,
-                    holo_path=resolved_input.holo_path,
-                    force_replace=True,
-                ):
+                try:
+                    replaced_output_dir = self._replace_existing_output_dir_if_needed(
+                        item_output_dir,
+                        holo_path=resolved_input.holo_path,
+                        force_replace=True,
+                    )
+                except RuntimeError as exc:
+                    self._log_batch(f"{item_prefix} [FAIL] {exc}")
+                    self._set_minimal_status("Run failed.")
+                    messagebox.showerror("Output folder unavailable", str(exc))
+                    return
+                if replaced_output_dir:
                     self._log_batch(
                         f"{item_prefix} Replaced existing output directory: "
                         f"{item_output_dir}"
@@ -2304,10 +1900,17 @@ class ProcessApp(_BaseAppTk):
         self._log_batch(f"[INPUT] DATA DIR -> {resolved_input.data_dir}")
         self._log_batch(f"[RESOLVED] HD -> {resolved_input.hd_h5}")
         self._log_batch(f"[RESOLVED] DV -> {resolved_input.dv_h5}")
-        if self._replace_existing_output_dir_if_needed(
-            base_output_dir,
-            holo_path=resolved_input.holo_path,
-        ):
+        try:
+            replaced_output_dir = self._replace_existing_output_dir_if_needed(
+                base_output_dir,
+                holo_path=resolved_input.holo_path,
+            )
+        except RuntimeError as exc:
+            self._log_batch(f"[FAIL] {exc}")
+            self._set_minimal_status("Run failed.")
+            messagebox.showerror("Output folder unavailable", str(exc))
+            return
+        if replaced_output_dir:
             self._log_batch(
                 f"[OUTPUT] Replaced existing output directory: {base_output_dir}"
             )
@@ -2412,14 +2015,14 @@ class ProcessApp(_BaseAppTk):
     ) -> Path:
         output_h5_path.parent.mkdir(parents=True, exist_ok=True)
         with ExitStack() as stack:
-            work_h5 = stack.enter_context(h5py.File(output_h5_path, "w"))
+            work_h5 = stack.enter_context(open_h5(output_h5_path, "w"))
             hd_h5 = (
-                stack.enter_context(h5py.File(holodoppler_h5, "r"))
+                stack.enter_context(open_h5(holodoppler_h5, "r"))
                 if holodoppler_h5 is not None
                 else None
             )
             dv_h5 = (
-                stack.enter_context(h5py.File(doppler_vision_h5, "r"))
+                stack.enter_context(open_h5(doppler_vision_h5, "r"))
                 if doppler_vision_h5 is not None
                 else None
             )
@@ -2437,7 +2040,7 @@ class ProcessApp(_BaseAppTk):
 
             for pipeline_desc in pipelines:
                 pipeline = pipeline_desc.instantiate()
-                pipeline_input = _PipelineInputView(
+                pipeline_input = PipelineInputView(
                     work_h5=work_h5,
                     holodoppler_h5=hd_h5,
                     doppler_vision_h5=dv_h5,
@@ -2470,24 +2073,12 @@ class ProcessApp(_BaseAppTk):
             zip_path = target_path.expanduser().resolve()
         if zip_path.exists():
             zip_path.unlink()
-        files = sorted(
-            (file_path for file_path in folder.rglob("*") if file_path.is_file()),
-            key=lambda path: str(path.relative_to(folder)),
-        )
-        total_files = len(files)
-        if progress_callback is not None:
-            progress_callback(0, total_files, Path("."))
-        with zipfile.ZipFile(
+        create_zip_from_tree(
+            folder,
             zip_path,
-            "w",
-            compression=zipfile.ZIP_DEFLATED,
             compresslevel=1,
-        ) as zf:
-            for idx, file_path in enumerate(files, start=1):
-                rel_path = file_path.relative_to(folder)
-                zf.write(file_path, rel_path)
-                if progress_callback is not None:
-                    progress_callback(idx, total_files, rel_path)
+            progress_callback=progress_callback,
+        )
         return zip_path
 
 

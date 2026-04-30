@@ -1,3 +1,9 @@
+"""Read and write EyeFlow HDF5 files.
+
+This file contains concrete HDF5 operations: opening files, copying contents,
+writing datasets, and appending pipeline results.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -358,8 +364,11 @@ def append_result_group(
     result: "ProcessResult",
 ) -> h5py.Group:
     from pipelines.core.base import ProcessResult
+    from utils.io.output_writer import is_root_mirrored_output_key
 
-    pipelines_grp = h5file["EyeFlow"] if "EyeFlow" in h5file else h5file.create_group("EyeFlow")
+    pipelines_grp = (
+        h5file["EyeFlow"] if "EyeFlow" in h5file else h5file.create_group("EyeFlow")
+    )
     pipeline_grp = _get_or_replace_group(pipelines_grp, safe_h5_key(pipeline_name))
     pipeline_grp.attrs["pipeline"] = pipeline_name
     if result.attrs:
@@ -369,6 +378,8 @@ def append_result_group(
             set_attr_safe(pipeline_grp, key, value)
     for key, value in result.metrics.items():
         write_value_dataset(pipeline_grp, key, value)
+        if is_root_mirrored_output_key(key):
+            write_value_dataset(h5file, key, value)
     h5file.flush()
     return pipeline_grp
 

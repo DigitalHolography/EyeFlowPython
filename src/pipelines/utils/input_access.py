@@ -1,3 +1,5 @@
+"""Fixed-source input readers shared by EyeFlow pipelines."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,8 +8,12 @@ from typing import TYPE_CHECKING
 import h5py
 import numpy as np
 
+from utils.io.schema import HD_BATCH_STRIDE_KEY, HD_SAMPLING_FREQ_KEY
+
 if TYPE_CHECKING:
-    from eye_flow import _PipelineInputView
+    from collections.abc import Mapping
+
+    from utils.io import PipelineInputView
 
 
 @dataclass(frozen=True)
@@ -16,90 +22,62 @@ class ResolvedArray:
     value: np.ndarray
 
 
-def dataset_path_candidates(*paths: str) -> tuple[str, ...]:
-    candidates: list[str] = []
-    for path in paths:
-        normalized = str(path).replace("\\", "/").strip("/")
-        if not normalized:
-            continue
-        for candidate in (
-            normalized,
-            normalized.removesuffix("/value"),
-            f"{normalized}/value",
-        ):
-            if candidate and candidate not in candidates:
-                candidates.append(candidate)
-    return tuple(candidates)
+@dataclass(frozen=True)
+class HolodopplerTiming:
+    sampling_freq: float
+    batch_stride: float
+
+    @property
+    def dt_seconds(self) -> float:
+        return self.batch_stride / self.sampling_freq
 
 
-def resolve_required_array(
-    pipeline_input: "_PipelineInputView",
+def resolve_required_source_array(
+    source: h5py.File | None,
+    *,
+    source_name: str,
     logical_name: str,
-    *candidate_roots: str,
+    path: str,
 ) -> ResolvedArray:
-    candidate_paths = dataset_path_candidates(*candidate_roots)
-    for candidate_path in candidate_paths:
-        found = pipeline_input.get(candidate_path)
-        if isinstance(found, h5py.Dataset):
-            return ResolvedArray(
-                path=candidate_path,
-                value=np.asarray(found[()]),
-            )
-
-    candidates_text = ", ".join(candidate_paths)
-    raise KeyError(
-        f"Missing pipeline prerequisite '{logical_name}'. "
-        f"Tried dataset paths: {candidates_text}"
-    )
+    if source is None:
+        raise KeyError(f"{source_name} HDF5 input is required for '{logical_name}'.")
+    found = source.get(path)
+    if not isinstance(found, h5py.Dataset):
+        raise KeyError(
+            f"Missing {source_name} dataset for '{logical_name}'. Expected: {path}"
+        )
+    return ResolvedArray(path=path, value=np.asarray(found[()]))
 
 
-def read_first_attr(pipeline_input: "_PipelineInputView", *keys: str):
+def resolve_holodoppler_timing(
+    pipeline_input: "PipelineInputView",
+) -> HolodopplerTiming:
+    sampling_freq = _read_hd_scalar_or_config(pipeline_input, HD_SAMPLING_FREQ_KEY)
+    batch_stride = _read_hd_scalar_or_config(pipeline_input, HD_BATCH_STRIDE_KEY)
+    if sampling_freq is None or batch_stride is None:
+        raise KeyError(
+            "Could not resolve Holodoppler timing. Expected fixed keys "
+            f"'{HD_SAMPLING_FREQ_KEY}' and '{HD_BATCH_STRIDE_KEY}' in the HD HDF5 "
+            "or its sidecar parameters.json."
+        )
+    return HolodopplerTiming(float(sampling_freq), float(batch_stride))
+
+
+def resolve_dt_seconds(pipeline_input: "PipelineInputView") -> float:
+    return resolve_holodoppler_timing(pipeline_input).dt_seconds
+
+
+def read_first_attr(pipeline_input: "PipelineInputView", *keys: str):
     for key in keys:
         value = pipeline_input.attrs.get(key, None)
-        if value is None:
-            continue
-        array = np.asarray(value).reshape(-1)
-        if array.size == 0:
-            continue
-        scalar = array[0]
-        if isinstance(scalar, bytes):
-            return scalar.decode("utf-8")
-        return scalar.item() if hasattr(scalar, "item") else scalar
+        scalar = _scalar_from_value(value)
+        if scalar is not None:
+            return scalar
     return None
 
 
-def resolve_dt_seconds(pipeline_input: "_PipelineInputView") -> float:
-    explicit_dt = read_first_attr(
-        pipeline_input,
-        "dt_seconds",
-        "frame_period_seconds",
-        "time_step_seconds",
-    )
-    if explicit_dt is not None:
-        return float(explicit_dt)
-
-    stride = read_first_attr(
-        pipeline_input,
-        "batch_stride",
-        "stride",
-        "time_transformation_stride",
-    )
-    fs = read_first_attr(pipeline_input, "fs", "Fs")
-    camera_fps = read_first_attr(pipeline_input, "camera_fps")
-
-    if stride is not None and fs is not None:
-        return float(stride) / float(fs) / 1000.0
-    if stride is not None and camera_fps is not None:
-        return float(stride) / float(camera_fps)
-
-    raise KeyError(
-        "Could not resolve dt_seconds from input attributes. Expected "
-        "dt_seconds directly, or stride + fs/camera_fps."
-    )
-
-
 def read_int_setting(
-    pipeline_input: "_PipelineInputView",
+    pipeline_input: "PipelineInputView",
     *,
     default: int,
     keys: tuple[str, ...],
@@ -108,3 +86,45 @@ def read_int_setting(
     if value is None:
         return int(default)
     return int(value)
+
+
+def read_nested_int_setting(
+    config: "Mapping[str, object]",
+    section: str,
+    key: str,
+    *,
+    default: int,
+) -> int:
+    section_value = config.get(section, {})
+    if not isinstance(section_value, dict):
+        return int(default)
+    value = _scalar_from_value(section_value.get(key))
+    return int(default) if value is None else int(value)
+
+
+def _read_hd_scalar_or_config(pipeline_input: "PipelineInputView", key: str):
+    value = _read_source_scalar(pipeline_input.hd, key)
+    if value is not None:
+        return value
+    return _scalar_from_value(pipeline_input.hd_config.get(key))
+
+
+def _read_source_scalar(source: h5py.File | None, path: str):
+    if source is None:
+        return None
+    found = source.get(path)
+    if not isinstance(found, h5py.Dataset):
+        return None
+    return _scalar_from_value(found[()])
+
+
+def _scalar_from_value(value):
+    if value is None:
+        return None
+    array = np.asarray(value).reshape(-1)
+    if array.size == 0:
+        return None
+    scalar = array[0]
+    if isinstance(scalar, bytes):
+        return scalar.decode("utf-8")
+    return scalar.item() if hasattr(scalar, "item") else scalar

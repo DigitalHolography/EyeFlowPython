@@ -1,6 +1,6 @@
-"""Compatibility exports for zip archive helpers."""
+"""Public zip archive helpers."""
 
-from .archives import (
+from .zip_archive import (
     create_zip_from_tree,
     extract_file_from_zip,
     extract_folder_from_zip,

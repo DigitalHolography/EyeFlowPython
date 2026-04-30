@@ -12,10 +12,6 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-fake_h5py = types.ModuleType("h5py")
-fake_h5py.File = object
-sys.modules.setdefault("h5py", fake_h5py)
-
 fake_pipelines = types.ModuleType("pipelines")
 fake_pipelines.PipelineDescriptor = object
 fake_pipelines.ProcessResult = object
@@ -35,7 +31,6 @@ sys.modules.setdefault("pipelines.core.utils", fake_pipeline_utils)
 from eye_flow import ProcessApp  # noqa: E402
 
 for _module_name in (
-    "h5py",
     "pipelines",
     "pipelines.core",
     "pipelines.core.errors",
@@ -61,6 +56,7 @@ class BatchRunTests(unittest.TestCase):
     def _make_fake_app(
         self,
         *,
+        holo_path: Path,
         hd_path: Path | None,
         dv_path: Path | None,
         base_output_dir: Path,
@@ -99,8 +95,16 @@ class BatchRunTests(unittest.TestCase):
             pipeline_rows=[pipeline],
             pipeline_visibility={"Demo": True},
             pipeline_registry={"Demo": pipeline},
-            _selected_input_paths=lambda: (hd_path, dv_path),
-            _validate_selected_inputs=lambda *_args: True,
+            _selected_holo_paths=lambda: [holo_path],
+            _validate_selected_inputs=lambda *_args: [
+                SimpleNamespace(
+                    holo_path=holo_path,
+                    data_dir=holo_path.parent / holo_path.stem,
+                    hd_h5=hd_path,
+                    dv_h5=dv_path,
+                )
+            ],
+            _replace_existing_output_dir_if_needed=lambda *args, **kwargs: False,
             _reset_batch_output=lambda *args, **kwargs: None,
             _log_batch=logs.append,
             _start_progress=lambda total_units, **kwargs: setattr(
@@ -128,14 +132,19 @@ class BatchRunTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
+            holo_path = tmp_path / "subject.holo"
+            holo_path.write_text("dummy", encoding="utf-8")
             hd_path = tmp_path / "subject_holodoppler.h5"
             hd_path.write_text("dummy", encoding="utf-8")
+            dv_path = tmp_path / "subject_doppler_vision.h5"
+            dv_path.write_text("dummy", encoding="utf-8")
             base_output_dir = tmp_path / "outputs"
             base_output_dir.mkdir()
 
             app = self._make_fake_app(
+                holo_path=holo_path,
                 hd_path=hd_path,
-                dv_path=None,
+                dv_path=dv_path,
                 base_output_dir=base_output_dir,
                 zip_should_fail=False,
             )
@@ -160,14 +169,19 @@ class BatchRunTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
+            holo_path = tmp_path / "subject.holo"
+            holo_path.write_text("dummy", encoding="utf-8")
             hd_path = tmp_path / "subject_holodoppler.h5"
             hd_path.write_text("dummy", encoding="utf-8")
+            dv_path = tmp_path / "subject_doppler_vision.h5"
+            dv_path.write_text("dummy", encoding="utf-8")
             base_output_dir = tmp_path / "outputs"
             base_output_dir.mkdir()
 
             app = self._make_fake_app(
+                holo_path=holo_path,
                 hd_path=hd_path,
-                dv_path=None,
+                dv_path=dv_path,
                 base_output_dir=base_output_dir,
                 zip_should_fail=True,
             )
@@ -181,66 +195,58 @@ class BatchRunTests(unittest.TestCase):
             self.assertTrue(any(str(work_dirs[0]) in line for line in app.logs))
             self.assertEqual("Zip failed", showerror.call_args.args[0])
 
-
 class InputHandlingTests(unittest.TestCase):
     def _make_bare_app(self):
         app = ProcessApp.__new__(ProcessApp)
-        app.batch_hd_input_var = _Var("")
-        app.batch_dv_input_var = _Var("")
+        app.batch_holo_input_var = _Var("")
         app.batch_output_var = _Var("")
         app.batch_zip_var = _Var(False)
         app.batch_zip_name_var = _Var("outputs.zip")
+        app._selected_holo_input_paths = []
+        app._synchronizing_holo_input_var = False
         app._reset_progress = lambda: None
         app._set_minimal_status = lambda _text: None
         logs: list[str] = []
         app._log_batch = logs.append
         return app, logs
 
-    def test_handle_dropped_paths_assigns_hd_and_dv_inputs(self) -> None:
+    def test_handle_dropped_paths_assigns_holo_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            hd_path = tmp_path / "subject_holodoppler.h5"
-            dv_path = tmp_path / "subject_doppler_vision.h5"
-            hd_path.write_text("dummy", encoding="utf-8")
-            dv_path.write_text("dummy", encoding="utf-8")
+            holo_path = tmp_path / "subject.holo"
+            holo_path.write_text("dummy", encoding="utf-8")
 
             app, logs = self._make_bare_app()
 
-            accepted = ProcessApp._handle_dropped_paths(app, [hd_path, dv_path])
+            accepted = ProcessApp._handle_dropped_paths(app, [holo_path])
 
             self.assertTrue(accepted)
-            self.assertEqual(str(hd_path), app.batch_hd_input_var.get())
-            self.assertEqual(str(dv_path), app.batch_dv_input_var.get())
-            self.assertEqual(str(tmp_path), app.batch_output_var.get())
+            self.assertEqual(str(holo_path), app.batch_holo_input_var.get())
+            self.assertEqual(
+                str(tmp_path / "subject" / "subject_EF"),
+                app.batch_output_var.get(),
+            )
             self.assertEqual("subject_eyeflow.zip", app.batch_zip_name_var.get())
-            self.assertEqual(2, len(logs))
-            self.assertIn("Drag and drop HD", logs[0])
-            self.assertIn("Drag and drop DV", logs[1])
+            self.assertEqual(1, len(logs))
+            self.assertIn("Drag and drop HOLO", logs[0])
 
     @mock.patch("eye_flow.messagebox.showwarning")
-    def test_validate_selected_inputs_requires_both_files(
+    def test_validate_selected_inputs_requires_holo_selection(
         self,
         showwarning,
     ) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            hd_path = Path(tmp_dir) / "subject_holodoppler.h5"
-            hd_path.write_text("dummy", encoding="utf-8")
-            app = ProcessApp.__new__(ProcessApp)
+        app = ProcessApp.__new__(ProcessApp)
 
-            is_valid = ProcessApp._validate_selected_inputs(
-                app,
-                hd_path,
-                None,
-                [SimpleNamespace(name="Demo")],
-            )
+        resolved = ProcessApp._validate_selected_inputs(app, [])
 
-            self.assertFalse(is_valid)
-            self.assertEqual("Missing input", showwarning.call_args.args[0])
+        self.assertIsNone(resolved)
+        self.assertEqual("Missing input", showwarning.call_args.args[0])
 
     def test_minimal_output_filename_uses_current_inputs(self) -> None:
         app = ProcessApp.__new__(ProcessApp)
         app.ui_mode = "minimal"
         app.batch_zip_var = _Var(False)
+        app._selected_holo_paths = lambda: [Path("subject.holo")]
         app._default_work_h5_name = lambda: "subject_eyeflow.h5"
 
         output_name = ProcessApp._minimal_output_filename_for_run(app)

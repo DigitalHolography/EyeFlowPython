@@ -12,8 +12,8 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from eye_flow import _PipelineInputView  # noqa: E402
 from pipelines.dual_input_tutorial import DualInputTutorial  # noqa: E402
+from input_output import PipelineInputView  # noqa: E402
 
 
 class DualInputTutorialTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class DualInputTutorialTests(unittest.TestCase):
                 h5py.File(hd_path, "r") as hd_h5,
                 h5py.File(dv_path, "r") as dv_h5,
             ):
-                input_view = _PipelineInputView(
+                input_view = PipelineInputView(
                     work_h5=work_h5,
                     holodoppler_h5=hd_h5,
                     doppler_vision_h5=dv_h5,
@@ -92,7 +92,7 @@ class DualInputTutorialTests(unittest.TestCase):
                 result.attrs["dv_example_path"],
             )
 
-    def test_eye_flow_proxy_resolves_previous_pipeline_outputs(self) -> None:
+    def test_eye_flow_proxy_resolves_root_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             hd_path = tmp_path / "sample_holodoppler.h5"
@@ -106,18 +106,11 @@ class DualInputTutorialTests(unittest.TestCase):
                 dv_h5.create_dataset("Meta/example", data=np.array([2.0], dtype=float))
 
             with h5py.File(work_path, "w") as work_h5:
-                eye_flow = work_h5.create_group("EyeFlow")
-                previous = eye_flow.create_group("first_pipeline")
-                previous.create_dataset(
-                    "summary/value",
-                    data=np.array([11.0], dtype=float),
-                )
-                latest = eye_flow.create_group("second_pipeline")
-                latest.create_dataset(
+                work_h5.create_dataset(
                     "summary/value",
                     data=np.array([22.0], dtype=float),
                 )
-                latest.create_dataset(
+                work_h5.create_dataset(
                     "other/path",
                     data=np.array([33.0], dtype=float),
                 )
@@ -127,20 +120,17 @@ class DualInputTutorialTests(unittest.TestCase):
                 h5py.File(hd_path, "r") as hd_h5,
                 h5py.File(dv_path, "r") as dv_h5,
             ):
-                input_view = _PipelineInputView(
+                input_view = PipelineInputView(
                     work_h5=work_h5,
                     holodoppler_h5=hd_h5,
                     doppler_vision_h5=dv_h5,
                 )
 
                 latest_value = np.asarray(input_view.ef["summary/value"])
-                explicit_value = np.asarray(
-                    input_view.ef["second_pipeline/other/path"]
-                )
+                explicit_value = np.asarray(input_view.ef["other/path"])
 
             np.testing.assert_allclose(latest_value, np.array([22.0], dtype=float))
             np.testing.assert_allclose(explicit_value, np.array([33.0], dtype=float))
-
 
 if __name__ == "__main__":
     unittest.main()

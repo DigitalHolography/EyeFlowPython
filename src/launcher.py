@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from runtime_limits import configure_numeric_threads
+
 
 def _find_checkout_src(
     module_filename: str,
@@ -54,8 +56,10 @@ def _call_entry(
 
 
 def main() -> Any:
+    configure_numeric_threads()
     return _call_entry("eye_flow", "eye_flow.py", "main")
 
 
 def cli_main(argv: list[str] | None = None) -> Any:
+    configure_numeric_threads()
     return _call_entry("cli", "cli.py", "main", argv)

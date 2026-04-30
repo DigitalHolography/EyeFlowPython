@@ -23,6 +23,10 @@ import zipfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from runtime_limits import configure_numeric_threads
+
+configure_numeric_threads()
+
 import h5py
 
 from pipelines import (
@@ -31,7 +35,7 @@ from pipelines import (
     load_pipeline_catalog,
 )
 from pipelines.core.errors import format_pipeline_exception
-from pipelines.core.utils import write_combined_results_h5
+from input_output import write_combined_results_h5
 
 
 def _build_pipeline_registry() -> dict[str, PipelineDescriptor]:

@@ -12,7 +12,7 @@ from typing import Any
 APP_NAME = "EyeFlow"
 SETTINGS_FILENAME = "settings.json"
 DEFAULT_SETTINGS_FILENAME = "default_settings.json"
-LAST_BATCH_LOG_FILENAME = "last_batch_log.txt"
+LAST_BATCH_LOG_FILENAME = "last_EF_log.txt"
 VERSION_PATTERN = re.compile(r'^version\s*=\s*"([^"]+)"\s*$')
 INVALID_PATH_CHARS_PATTERN = re.compile(r'[<>:"/\\|?*]+')
 

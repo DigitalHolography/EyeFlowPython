@@ -165,9 +165,6 @@ def set_attr_safe(h5obj: h5py.File | h5py.Group | h5py.Dataset, key: str, value)
         h5obj.attrs[key] = str(value)
 
 
-DEFAULT_COMPRESSION_THRESHOLD = 1_000_000
-
-
 def _normalize_dataset_payload(data, ds_attrs):
     original_class = None
     payload = data
@@ -180,11 +177,6 @@ def _normalize_dataset_payload(data, ds_attrs):
     elif isinstance(payload, (list, tuple)):
         payload = np.asarray(payload)
 
-    if isinstance(payload, np.ndarray):
-        if payload.dtype.kind == "f" and payload.dtype.itemsize == 8:
-            payload = payload.astype(np.float32)
-            original_class = original_class or "float64"
-
     if original_class is not None:
         ds_attrs = {} if ds_attrs is None else dict(ds_attrs)
         ds_attrs.setdefault("original_class", original_class)
@@ -193,17 +185,6 @@ def _normalize_dataset_payload(data, ds_attrs):
 
 
 def _get_dataset_creation_kwargs(payload: np.ndarray) -> dict[str, object]:
-    if (
-        isinstance(payload, np.ndarray)
-        and payload.dtype.kind in "bBhHiIlLef"
-        and payload.nbytes >= DEFAULT_COMPRESSION_THRESHOLD
-        and payload.ndim > 0
-    ):
-        return {
-            "compression": "gzip",
-            "compression_opts": 6,
-            "chunks": tuple(min(s, 1024) for s in payload.shape),
-        }
     return {}
 
 
@@ -363,25 +344,18 @@ def append_result_group(
     pipeline_name: str,
     result: "ProcessResult",
 ) -> h5py.Group:
-    from pipelines.core.base import ProcessResult
-    from utils.io.output_writer import is_root_mirrored_output_key
-
-    pipelines_grp = (
-        h5file["EyeFlow"] if "EyeFlow" in h5file else h5file.create_group("EyeFlow")
-    )
-    pipeline_grp = _get_or_replace_group(pipelines_grp, safe_h5_key(pipeline_name))
-    pipeline_grp.attrs["pipeline"] = pipeline_name
+    if "EyeFlow" in h5file:
+        del h5file["EyeFlow"]
+    h5file.attrs["last_pipeline"] = pipeline_name
     if result.attrs:
         for key, value in result.attrs.items():
             if key == "pipeline":
                 continue
-            set_attr_safe(pipeline_grp, key, value)
+            set_attr_safe(h5file, key, value)
     for key, value in result.metrics.items():
-        write_value_dataset(pipeline_grp, key, value)
-        if is_root_mirrored_output_key(key):
-            write_value_dataset(h5file, key, value)
+        write_value_dataset(h5file, key, value)
     h5file.flush()
-    return pipeline_grp
+    return h5file
 
 
 def write_result_h5(

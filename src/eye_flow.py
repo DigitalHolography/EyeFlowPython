@@ -14,6 +14,10 @@ from contextlib import ExitStack
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from runtime_limits import configure_numeric_threads
+
+configure_numeric_threads()
+
 from app_settings import (
     LAST_BATCH_LOG_FILENAME,
     AppSettingsStore,
@@ -34,14 +38,13 @@ except ImportError:  #  optional dependency
 
 from pipelines import PipelineDescriptor, load_pipeline_catalog
 from pipelines.core.errors import format_pipeline_exception
-from utils.io import (
+from input_output import (
+    EyeFlowOutputManager,
     HOLO_SUFFIX,
     PipelineInputView,
     ResolvedHoloInput,
-    append_result_group,
     create_zip_from_tree,
     holo_input_status,
-    initialize_output_h5,
     open_h5,
     reset_output_dir,
     resolve_selected_holo_inputs,
@@ -2026,8 +2029,8 @@ class ProcessApp(_BaseAppTk):
                 if doppler_vision_h5 is not None
                 else None
             )
-            initialize_output_h5(
-                work_h5,
+            output_manager = EyeFlowOutputManager(work_h5)
+            output_manager.initialize(
                 holodoppler_source_file=(
                     str(holodoppler_h5) if holodoppler_h5 is not None else None
                 ),
@@ -2051,7 +2054,7 @@ class ProcessApp(_BaseAppTk):
                     raise RuntimeError(
                         format_pipeline_exception(exc, pipeline)
                     ) from exc
-                append_result_group(work_h5, pipeline.name, result)
+                output_manager.append_pipeline_result(pipeline.name, result)
                 result.output_h5_path = str(output_h5_path)
                 self._log_batch(f"[OK] {pipeline.name}")
                 self._advance_progress()

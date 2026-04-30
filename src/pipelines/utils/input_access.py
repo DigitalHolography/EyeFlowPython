@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING
 import h5py
 import numpy as np
 
-from utils.io.schema import HD_BATCH_STRIDE_KEY, HD_SAMPLING_FREQ_KEY
+from input_output.schema import HOLODOPPLER_SCHEMA, JsonConfigValueSpec
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from utils.io import PipelineInputView
+    from input_output import PipelineInputView
 
 
 @dataclass(frozen=True)
@@ -52,12 +52,14 @@ def resolve_required_source_array(
 def resolve_holodoppler_timing(
     pipeline_input: "PipelineInputView",
 ) -> HolodopplerTiming:
-    sampling_freq = _read_hd_scalar_or_config(pipeline_input, HD_SAMPLING_FREQ_KEY)
-    batch_stride = _read_hd_scalar_or_config(pipeline_input, HD_BATCH_STRIDE_KEY)
+    sampling_spec = HOLODOPPLER_SCHEMA.config_value("sampling_freq")
+    stride_spec = HOLODOPPLER_SCHEMA.config_value("batch_stride")
+    sampling_freq = _read_hd_scalar_or_config(pipeline_input, sampling_spec)
+    batch_stride = _read_hd_scalar_or_config(pipeline_input, stride_spec)
     if sampling_freq is None or batch_stride is None:
         raise KeyError(
             "Could not resolve Holodoppler timing. Expected fixed keys "
-            f"'{HD_SAMPLING_FREQ_KEY}' and '{HD_BATCH_STRIDE_KEY}' in the HD HDF5 "
+            f"'{sampling_spec.h5_path}' and '{stride_spec.h5_path}' in the HD HDF5 "
             "or its sidecar parameters.json."
         )
     return HolodopplerTiming(float(sampling_freq), float(batch_stride))
@@ -102,15 +104,18 @@ def read_nested_int_setting(
     return int(default) if value is None else int(value)
 
 
-def _read_hd_scalar_or_config(pipeline_input: "PipelineInputView", key: str):
-    value = _read_source_scalar(pipeline_input.hd, key)
+def _read_hd_scalar_or_config(
+    pipeline_input: "PipelineInputView",
+    spec: JsonConfigValueSpec,
+):
+    value = _read_source_scalar(pipeline_input.hd, spec.h5_path)
     if value is not None:
         return value
-    return _scalar_from_value(pipeline_input.hd_config.get(key))
+    return _scalar_from_value(spec.read_json_config(pipeline_input.hd_config))
 
 
-def _read_source_scalar(source: h5py.File | None, path: str):
-    if source is None:
+def _read_source_scalar(source: h5py.File | None, path: str | None):
+    if source is None or path is None:
         return None
     found = source.get(path)
     if not isinstance(found, h5py.Dataset):

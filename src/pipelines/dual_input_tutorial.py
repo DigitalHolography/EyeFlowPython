@@ -15,7 +15,7 @@ class DualInputTutorial(ProcessPipeline):
     - `h5file.hd`: the holodoppler input handle
     - `h5file.dv`: the doppler vision input handle
     - `h5file.work`: the current EyeFlow output/work file
-    - `h5file.ef`: previous EyeFlow pipeline outputs, searchable via `h5file.ef["path"]`
+    - `h5file.ef`: current root-level EyeFlow outputs, searchable via `h5file.ef["path"]`
     """
 
     description = "Tutorial: read HD and DV inputs simultaneously in one pipeline."

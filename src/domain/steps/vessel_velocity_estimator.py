@@ -6,6 +6,8 @@ from functools import partial
 
 import numpy as np
 
+from runtime_limits import cap_parallel_jobs
+
 from ._masks import elliptical_mask
 from .base import DomainStep as BaseStep
 
@@ -56,7 +58,7 @@ class VesselVelocityEstimatorStep(BaseStep):
         disk, dilation, inpaint = _skimage_dependencies()
         mask = dilation(vessel_mask, disk(local_background_dist)) #TODO add parameter
 
-        n_jobs = _cpu_count() #TODO add parameter for number of parallel jobs
+        n_jobs = cap_parallel_jobs(_cpu_count())
 
         print(f"    - Inpainting fRMS with {n_jobs} parallel jobs")
 
@@ -64,7 +66,7 @@ class VesselVelocityEstimatorStep(BaseStep):
             return inpaint.inpaint_biharmonic(frame, mask)
 
         fRMSbkg = _run_in_parallel(
-            partial(_inpaint_frame, mask=mask), fRMS, n_jobs=-1, chunking=False
+            partial(_inpaint_frame, mask=mask), fRMS, n_jobs=n_jobs, chunking=False
         )
 
         # fRMSbkg = np.stack(np.array([inpaint.inpaint_biharmonic(frame, mask) for frame in fRMS]), axis=0)
@@ -130,6 +132,7 @@ def _run_in_parallel(func, iterable, n_jobs=-1, chunking=False):
         return np.stack([func(item) for item in iterable], axis=0)
     if n_jobs == -1:
         n_jobs = joblib.cpu_count()
+    n_jobs = cap_parallel_jobs(n_jobs)
     results = joblib.Parallel(n_jobs=n_jobs, backend="threading")(
         joblib.delayed(func)(item) for item in iterable
     )

@@ -20,17 +20,10 @@ from pipelines.utils.input_access import (
     resolve_holodoppler_timing,
     resolve_required_source_array,
 )
-from utils.io import (
-    DOPPLERVIEW_ARTERIAL_VELOCITY_SIGNAL_PATH,
-    DOPPLERVIEW_BEAT_INDICES_PATH,
-    DOPPLERVIEW_LOCAL_BACKGROUND_DIST_KEY,
-    DOPPLERVIEW_TIME_PER_BEAT_PATH,
-    DOPPLERVIEW_VELOCITY_ESTIMATION_SECTION,
-    DOPPLERVIEW_VENOUS_VELOCITY_SIGNAL_PATH,
-    DV_RETINAL_ARTERY_MASK_PATH,
-    DV_RETINAL_VEIN_MASK_PATH,
-    HD_MOMENT0_PATH,
-    HD_MOMENT2_PATH,
+from input_output import (
+    DOPPLER_VIEW_ANALYSIS_SCHEMA,
+    DOPPLER_VIEW_SCHEMA,
+    HOLODOPPLER_SCHEMA,
     pack_dopplerview_analysis_outputs,
     pack_velocity_per_beat_outputs,
     systolic_index_base_for_path,
@@ -109,7 +102,9 @@ def _per_beat_input_from_analysis(
         band_limited_signal_harmonic_count=harmonic_count,
         dt_seconds=timing.dt_seconds,
         beat_period_seconds=np.asarray(analysis["time_per_beat"], dtype=np.float64),
-        index_base=systolic_index_base_for_path(DOPPLERVIEW_BEAT_INDICES_PATH),
+        index_base=systolic_index_base_for_path(
+            DOPPLER_VIEW_ANALYSIS_SCHEMA.dataset_path("beat_indices")
+        ),
     )
 
 
@@ -124,8 +119,10 @@ def _run_dopplerview_analysis(
             "batch_stride": timing.batch_stride,
         },
         dopplerview_config={
-            "VelocityEstimation": {
-                "LocalBackgroundDist": _local_background_dist(pipeline_input),
+            DOPPLER_VIEW_SCHEMA.config_value("local_background_dist").section: {
+                DOPPLER_VIEW_SCHEMA.config_value(
+                    "local_background_dist"
+                ).json_key: _local_background_dist(pipeline_input),
             }
         },
     )
@@ -140,38 +137,40 @@ def _dopplerview_cache_from_h5(pipeline_input) -> dict[str, object]:
             pipeline_input.hd,
             "HD",
             "moment0",
-            HD_MOMENT0_PATH,
+            HOLODOPPLER_SCHEMA.dataset_path("moment0"),
             dopplerview_moment=True,
         ),
         "moment2": _read_required_float_array(
             pipeline_input.hd,
             "HD",
             "moment2",
-            HD_MOMENT2_PATH,
+            HOLODOPPLER_SCHEMA.dataset_path("moment2"),
             dopplerview_moment=True,
         ),
         "retinal_artery_mask": _read_required_bool_array(
             pipeline_input.dv,
             "DV",
             "retinal artery mask",
-            DV_RETINAL_ARTERY_MASK_PATH,
+            DOPPLER_VIEW_SCHEMA.dataset_path("retinal_artery_mask"),
         ),
         "retinal_vein_mask": _read_required_bool_array(
             pipeline_input.dv,
             "DV",
             "retinal vein mask",
-            DV_RETINAL_VEIN_MASK_PATH,
+            DOPPLER_VIEW_SCHEMA.dataset_path("retinal_vein_mask"),
         ),
     }
 
 
 def _local_background_dist(pipeline_input) -> int:
-    return read_nested_int_setting(
+    spec = DOPPLER_VIEW_SCHEMA.config_value("local_background_dist")
+    value = read_nested_int_setting(
         pipeline_input.dv_config,
-        DOPPLERVIEW_VELOCITY_ESTIMATION_SECTION,
-        DOPPLERVIEW_LOCAL_BACKGROUND_DIST_KEY,
-        default=DOPPLERVIEW_DEFAULT_LOCAL_BACKGROUND_DIST,
+        spec.section or "",
+        spec.json_key,
+        default=int(spec.default or DOPPLERVIEW_DEFAULT_LOCAL_BACKGROUND_DIST),
     )
+    return int(value)
 
 
 def _read_required_float_array(
@@ -228,10 +227,18 @@ def _context_attrs(
             "perBeatAnalysis",
         ],
         "analysis_source": "computed_dopplerview_steps",
-        "arterial_velocity_signal_path": DOPPLERVIEW_ARTERIAL_VELOCITY_SIGNAL_PATH,
-        "venous_velocity_signal_path": DOPPLERVIEW_VENOUS_VELOCITY_SIGNAL_PATH,
-        "systolic_peak_indexes_path": DOPPLERVIEW_BEAT_INDICES_PATH,
-        "beat_period_seconds_path": DOPPLERVIEW_TIME_PER_BEAT_PATH,
+        "arterial_velocity_signal_path": DOPPLER_VIEW_ANALYSIS_SCHEMA.dataset_path(
+            "retinal_artery_velocity_signal"
+        ),
+        "venous_velocity_signal_path": DOPPLER_VIEW_ANALYSIS_SCHEMA.dataset_path(
+            "retinal_vein_velocity_signal"
+        ),
+        "systolic_peak_indexes_path": DOPPLER_VIEW_ANALYSIS_SCHEMA.dataset_path(
+            "beat_indices"
+        ),
+        "beat_period_seconds_path": DOPPLER_VIEW_ANALYSIS_SCHEMA.dataset_path(
+            "time_per_beat"
+        ),
         "sampling_freq": float(timing.sampling_freq),
         "batch_stride": float(timing.batch_stride),
         "dt_seconds": float(timing.dt_seconds),

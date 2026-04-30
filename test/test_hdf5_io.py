@@ -13,7 +13,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from pipelines.core.base import DatasetValue  # noqa: E402
-from utils.io.hdf5 import write_value_dataset  # noqa: E402
+from input_output.hdf5 import write_value_dataset  # noqa: E402
 
 
 class HDF5IoTests(unittest.TestCase):
@@ -33,8 +33,7 @@ class HDF5IoTests(unittest.TestCase):
                 dataset = h5file["summary"]["mean"]
                 self.assertEqual(dataset.attrs["unit"], "a.u.")
                 self.assertEqual(dataset.attrs["nameID"], "summary/mean")
-                self.assertEqual(dataset.attrs["original_class"], "float64")
-                self.assertEqual(dataset.dtype, np.dtype("float32"))
+                self.assertEqual(dataset.dtype, np.dtype("float64"))
 
     def test_write_value_dataset_converts_booleans_to_uint8(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -54,7 +53,7 @@ class HDF5IoTests(unittest.TestCase):
                 self.assertEqual(dataset.attrs["original_class"], "bool")
                 self.assertEqual(dataset.attrs["nameID"], "mask")
 
-    def test_write_value_dataset_compresses_large_numeric_arrays(self) -> None:
+    def test_write_value_dataset_does_not_compress_large_numeric_arrays(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             h5_path = tmp_path / "out.h5"
@@ -65,9 +64,8 @@ class HDF5IoTests(unittest.TestCase):
 
             with h5py.File(h5_path, "r") as h5file:
                 dataset = h5file["big"]["values"]
-                self.assertEqual(dataset.compression, "gzip")
-                self.assertEqual(dataset.compression_opts, 6)
-                self.assertIsNotNone(dataset.chunks)
+                self.assertIsNone(dataset.compression)
+                self.assertIsNone(dataset.chunks)
 
 
 if __name__ == "__main__":

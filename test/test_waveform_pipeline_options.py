@@ -170,6 +170,20 @@ class WaveformPipelineOptionTests(unittest.TestCase):
             ) as profiles,
             patch.object(
                 velocity_runner,
+                "pack_displacement_magnitude_outputs",
+                return_value={"displacement_magnitude": 5},
+            ) as displacement_magnitude,
+            patch.object(
+                velocity_runner,
+                "pack_cross_section_displacement_profile_outputs",
+                return_value={"displacement_profiles": 6},
+            ) as displacement_profiles,
+            patch.object(
+                velocity_runner,
+                "pack_displacement_profile_outputs",
+            ) as legacy_displacement_profiles,
+            patch.object(
+                velocity_runner,
                 "pack_quadrant_velocity_outputs",
                 return_value={"quadrants": 4},
             ) as quadrants,
@@ -177,7 +191,14 @@ class WaveformPipelineOptionTests(unittest.TestCase):
             outputs = velocity_runner.run_waveform_velocity(ctx)
 
         self.assertEqual(
-            {"base": 1, "per_beat": 2, "profile": 3, "quadrants": 4},
+            {
+                "base": 1,
+                "per_beat": 2,
+                "profile": 3,
+                "displacement_magnitude": 5,
+                "displacement_profiles": 6,
+                "quadrants": 4,
+            },
             outputs,
         )
         profiles.assert_called_once_with(
@@ -186,6 +207,19 @@ class WaveformPipelineOptionTests(unittest.TestCase):
             (0, 5, 10),
             index_base=0,
         )
+        displacement_magnitude.assert_called_once_with(
+            "artery",
+            "vein",
+            (0, 5, 10),
+            index_base=0,
+        )
+        displacement_profiles.assert_called_once_with(
+            "artery",
+            "vein",
+            (0, 5, 10),
+            index_base=0,
+        )
+        legacy_displacement_profiles.assert_not_called()
         quadrants.assert_called_once_with(
             velocity_outputs,
             context.source_data,

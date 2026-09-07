@@ -93,6 +93,45 @@ class CrossSectionDisplacementTests(unittest.TestCase):
             -1.0,
             atol=1e-6,
         )
+        expected_magnitude = np.hypot(2.0, -1.0)
+        transverse_unmasked = (
+            result.transverse_displacement_profiles_unmasked[0, 0]
+        )
+        transverse_masked = result.transverse_displacement_profiles_masked[0, 0]
+        longitudinal_unmasked = (
+            result.longitudinal_displacement_profiles_unmasked[0, 0]
+        )
+        longitudinal_masked = result.longitudinal_displacement_profiles_masked[0, 0]
+        self.assertEqual((2, 181), transverse_unmasked.shape)
+        self.assertEqual((2, 181), transverse_masked.shape)
+        self.assertEqual((2, 181), longitudinal_unmasked.shape)
+        self.assertEqual((2, 181), longitudinal_masked.shape)
+        np.testing.assert_array_equal(
+            np.flatnonzero(np.isfinite(transverse_unmasked[0])),
+            np.arange(26, 154),
+        )
+        np.testing.assert_array_equal(
+            np.flatnonzero(np.isfinite(longitudinal_unmasked[0])),
+            np.arange(26, 154),
+        )
+        np.testing.assert_array_equal(
+            np.flatnonzero(np.isfinite(transverse_masked[0])),
+            np.arange(40, 140),
+        )
+        np.testing.assert_array_equal(
+            np.flatnonzero(np.isfinite(longitudinal_masked[0])),
+            np.arange(30, 150),
+        )
+        np.testing.assert_allclose(
+            transverse_masked[:, 40:140],
+            expected_magnitude,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            longitudinal_masked[:, 30:150],
+            expected_magnitude,
+            atol=1e-6,
+        )
         pixel_count = np.count_nonzero(resized_window)
         self.assertEqual(
             (1, 1, 2),
@@ -208,6 +247,22 @@ class CrossSectionDisplacementTests(unittest.TestCase):
             self.assertEqual(
                 (1, 0, 2),
                 displacement_result.y_sum_displacement_profile.shape,
+            )
+            self.assertEqual(
+                (1, 0, 2, 181),
+                displacement_result.transverse_displacement_profiles_unmasked.shape,
+            )
+            self.assertEqual(
+                (1, 0, 2, 181),
+                displacement_result.transverse_displacement_profiles_masked.shape,
+            )
+            self.assertEqual(
+                (1, 0, 2, 181),
+                displacement_result.longitudinal_displacement_profiles_unmasked.shape,
+            )
+            self.assertEqual(
+                (1, 0, 2, 181),
+                displacement_result.longitudinal_displacement_profiles_masked.shape,
             )
             self.assertEqual(
                 (1, 0, 2),

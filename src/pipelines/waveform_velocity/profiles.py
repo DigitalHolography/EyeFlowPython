@@ -7,8 +7,11 @@ import numpy as np
 from calculations.blood_flow_velocity.cross_section.profile_processing import (
     interpolate_velocity_profiles_per_beat,
 )
+from calculations.math import nanmean_float32
 from input_output.schema import EyeFlowOutputPaths, VelocityProfileOutputPaths
 from pipeline_engine.base import DatasetValue
+
+from .flow_asymmetry import pack_flow_asymmetry_outputs
 
 
 _DISPLACEMENT_PROFILE_ROOT = "Processing/DisplacementProfiles"
@@ -67,6 +70,218 @@ def pack_displacement_profile_outputs(
             index_base=index_base,
         )
     )
+    return outputs
+
+
+def pack_displacement_magnitude_outputs(
+    artery_segments,
+    vein_segments,
+    cycle_boundary_indexes,
+    *,
+    index_base: int = 0,
+) -> dict[str, object]:
+    """Pack one displacement-magnitude waveform per vessel segment."""
+
+    outputs = _pack_vessel_displacement_magnitudes(
+        artery_segments,
+        "Artery",
+        cycle_boundary_indexes,
+        index_base=index_base,
+    )
+    outputs.update(
+        _pack_vessel_displacement_magnitudes(
+            vein_segments,
+            "Vein",
+            cycle_boundary_indexes,
+            index_base=index_base,
+        )
+    )
+    return outputs
+
+
+def pack_cross_section_displacement_profile_outputs(
+    artery_segments,
+    vein_segments,
+    cycle_boundary_indexes,
+    *,
+    index_base: int = 0,
+) -> dict[str, object]:
+    """Pack displacement-magnitude profiles along each cross-section axis."""
+
+    outputs = _pack_vessel_displacement_axis_profiles(
+        artery_segments,
+        "Artery",
+        cycle_boundary_indexes,
+        include_transverse=True,
+        index_base=index_base,
+    )
+    outputs.update(
+        _pack_vessel_displacement_axis_profiles(
+            vein_segments,
+            "Vein",
+            cycle_boundary_indexes,
+            include_transverse=False,
+            index_base=index_base,
+        )
+    )
+    return outputs
+
+
+def _pack_vessel_displacement_axis_profiles(
+    segments,
+    vessel_name: str,
+    cycle_boundary_indexes,
+    *,
+    include_transverse: bool,
+    index_base: int,
+) -> dict[str, object]:
+    if segments is None:
+        return {}
+
+    outputs: dict[str, object] = {}
+    displacement_results = getattr(segments, "displacements", {})
+    for raw_method, displacement in sorted(displacement_results.items()):
+        method = _hdf_method_name(raw_method)
+        root = f"{_DISPLACEMENT_PROFILE_ROOT}/{method}/{vessel_name}"
+        outputs.update(
+            _pack_displacement_axis_profiles_for_method(
+                displacement,
+                root,
+                vessel_name=vessel_name,
+                cycle_boundary_indexes=cycle_boundary_indexes,
+                include_transverse=include_transverse,
+                index_base=index_base,
+            )
+        )
+    return outputs
+
+
+def _pack_displacement_axis_profiles_for_method(
+    displacement,
+    root: str,
+    *,
+    vessel_name: str,
+    cycle_boundary_indexes,
+    include_transverse: bool,
+    index_base: int,
+) -> dict[str, object]:
+    longitudinal_root = f"{root}/Longitudinal"
+    longitudinal_unmasked = _profile_dataset(
+        np.asarray(
+            displacement.longitudinal_displacement_profiles_unmasked,
+            dtype=np.float32,
+        ),
+        cycle_boundary_indexes,
+        index_base=index_base,
+        spatial_axis="y",
+        unit="pixels",
+    )
+    longitudinal_masked = _profile_dataset(
+        np.asarray(
+            displacement.longitudinal_displacement_profiles_masked,
+            dtype=np.float32,
+        ),
+        cycle_boundary_indexes,
+        index_base=index_base,
+        spatial_axis="y",
+        unit="pixels",
+    )
+    outputs = {
+        f"{longitudinal_root}/LongitudinalDisplacementProfileUnmasked": (
+            longitudinal_unmasked
+        ),
+        f"{longitudinal_root}/LongitudinalDisplacementProfileMasked": (
+            longitudinal_masked
+        ),
+    }
+    if vessel_name == "Artery":
+        longitudinal_meaned = _temporally_meaned_profile_dataset(
+            longitudinal_masked
+        )
+        outputs[
+            f"{longitudinal_root}/LongitudinalDisplacementProfileMaskedMeaned"
+        ] = longitudinal_meaned
+        outputs[f"{longitudinal_root}/P_D_longitudinal"] = (
+            _temporally_centered_profile_power_dataset(
+                longitudinal_masked,
+                longitudinal_meaned,
+            )
+        )
+    if include_transverse:
+        transverse_unmasked = _profile_dataset(
+            np.asarray(
+                displacement.transverse_displacement_profiles_unmasked,
+                dtype=np.float32,
+            ),
+            cycle_boundary_indexes,
+            index_base=index_base,
+            unit="pixels",
+        )
+        transverse_masked = _profile_dataset(
+            np.asarray(
+                displacement.transverse_displacement_profiles_masked,
+                dtype=np.float32,
+            ),
+            cycle_boundary_indexes,
+            index_base=index_base,
+            unit="pixels",
+        )
+        transverse_meaned = _temporally_meaned_profile_dataset(
+            transverse_masked
+        )
+        transverse_root = f"{root}/Transverse"
+        outputs.update(
+            {
+                f"{transverse_root}/TransverseDisplacementProfileUnmasked": (
+                    transverse_unmasked
+                ),
+                f"{transverse_root}/TransverseDisplacementProfileMasked": (
+                    transverse_masked
+                ),
+                f"{transverse_root}/TransverseDisplacementProfileMaskedMeaned": (
+                    transverse_meaned
+                ),
+                f"{transverse_root}/P_D_transverse": (
+                    _temporally_centered_profile_power_dataset(
+                        transverse_masked,
+                        transverse_meaned,
+                    )
+                ),
+            }
+        )
+    return outputs
+
+
+def _pack_vessel_displacement_magnitudes(
+    segments,
+    vessel_name: str,
+    cycle_boundary_indexes,
+    *,
+    index_base: int,
+) -> dict[str, object]:
+    if segments is None:
+        return {}
+
+    outputs: dict[str, object] = {}
+    displacement_results = getattr(segments, "displacements", {})
+    for raw_method, displacement in sorted(displacement_results.items()):
+        method = _hdf_method_name(raw_method)
+        path = (
+            f"{_DISPLACEMENT_PROFILE_ROOT}/{method}/{vessel_name}/"
+            "displacement_magnitude"
+        )
+        outputs[path] = _segment_displacement_magnitude_dataset(
+            np.asarray(
+                displacement.x_sum_displacement_profile,
+                dtype=np.float32,
+            ),
+            np.asarray(
+                displacement.y_sum_displacement_profile,
+                dtype=np.float32,
+            ),
+            cycle_boundary_indexes,
+            index_base=index_base,
+        )
     return outputs
 
 
@@ -159,7 +374,7 @@ def _pack_vessel_profiles(
     *,
     index_base: int,
 ) -> dict[str, object]:
-    return {
+    outputs = {
         paths.transverse_velocity_profile_unmasked: _profile_dataset(
             np.asarray(segments.velocity_profiles, dtype=np.float32),
             cycle_boundary_indexes,
@@ -193,6 +408,16 @@ def _pack_vessel_profiles(
             spatial_axis="y",
         ),
     }
+    # These metrics belong to displacement, so disable their velocity export.
+    # outputs.update(
+    #     pack_flow_asymmetry_outputs(
+    #         paths.flow_asymmetry_root,
+    #         segments,
+    #         cycle_boundary_indexes,
+    #         index_base=index_base,
+    #     )
+    # )
+    return outputs
 
 
 def _profile_dataset(
@@ -220,6 +445,50 @@ def _profile_dataset(
             "dimDesc": [spatial_axis, "time", "beat", "branch", "radius"],
         },
         h5_options=_profile_h5_options(profiles_per_beat.shape),
+    )
+
+
+def _temporally_meaned_profile_dataset(profile: DatasetValue) -> DatasetValue:
+    """Average an interpolated profile over time within each beat."""
+
+    data = nanmean_float32(np.asarray(profile.data), axis=1)
+    attrs = dict(profile.attrs or {})
+    dim_desc = list(attrs.get("dimDesc", ()))
+    if len(dim_desc) < 2 or dim_desc[1] != "time":
+        raise ValueError("profile dataset must have time as its second dimension.")
+    del dim_desc[1]
+    attrs["dimDesc"] = dim_desc
+    attrs["temporal_reduction"] = "mean_over_interpolated_beat_time"
+    return DatasetValue(
+        data=data,
+        attrs=attrs,
+        h5_options=_profile_h5_options(data.shape),
+    )
+
+
+def _temporally_centered_profile_power_dataset(
+    profile: DatasetValue,
+    temporal_mean: DatasetValue,
+) -> DatasetValue:
+    """Calculate squared displacement deviations from the temporal mean."""
+
+    values = np.asarray(profile.data, dtype=np.float32)
+    mean = np.asarray(temporal_mean.data, dtype=np.float32)
+    expected_mean_shape = (values.shape[0], *values.shape[2:])
+    if mean.shape != expected_mean_shape:
+        raise ValueError(
+            "temporal mean shape must match the profile without its time axis."
+        )
+    centered = values - mean[:, None, ...]
+    data = np.square(centered).astype(np.float32, copy=False)
+    attrs = dict(profile.attrs or {})
+    attrs["unit"] = "pixels^2"
+    attrs["formula"] = "(D(t) - mean_t(D(t)))**2"
+    attrs["temporal_centering"] = "per_beat_mean"
+    return DatasetValue(
+        data=data,
+        attrs=attrs,
+        h5_options=_profile_h5_options(data.shape),
     )
 
 
@@ -287,6 +556,45 @@ def _segment_displacement_metric_dataset(
             "coordinate_system": "rotated_segment_local",
             "displacement_reference": "temporal_mean_image",
             **metric_attrs,
+        },
+        h5_options=_profile_h5_options(data.shape),
+    )
+
+
+def _segment_displacement_magnitude_dataset(
+    x_profiles: np.ndarray,
+    y_profiles: np.ndarray,
+    cycle_boundary_indexes,
+    *,
+    index_base: int,
+) -> DatasetValue:
+    """Interpolate the vector magnitude trace of every vessel segment."""
+
+    if x_profiles.ndim != 3 or x_profiles.shape != y_profiles.shape:
+        raise ValueError(
+            "X and Y displacement profiles must have matching "
+            "(radius, branch, frame) shapes."
+        )
+    magnitude = np.hypot(x_profiles, y_profiles).astype(
+        np.float32,
+        copy=False,
+    )
+    profiles_per_beat = interpolate_velocity_profiles_per_beat(
+        magnitude[..., None],
+        cycle_boundary_indexes,
+        index_base=index_base,
+    )
+    data = profiles_per_beat[0]
+    return DatasetValue(
+        data=data,
+        attrs={
+            "unit": "pixels",
+            "dimDesc": ["time", "beat", "branch", "radius"],
+            "coordinate_system": "rotation_invariant",
+            "magnitude_formula": "sqrt(x**2 + y**2)",
+            "spatial_region": "vessel_segment",
+            "spatial_reduction": "magnitude_of_summed_displacement_components",
+            "displacement_reference": "temporal_mean_image",
         },
         h5_options=_profile_h5_options(data.shape),
     )

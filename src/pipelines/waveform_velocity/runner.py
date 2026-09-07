@@ -17,7 +17,9 @@ from .continuous import (
 )
 from .quadrants import pack_quadrant_velocity_outputs
 from .profiles import (
+    pack_cross_section_displacement_profile_outputs,
     pack_cross_section_profile_outputs,
+    pack_displacement_magnitude_outputs,
     pack_displacement_profile_outputs,
 )
 from .segment_maps import (
@@ -129,8 +131,25 @@ def run_waveform_velocity(ctx) -> dict[str, object]:
                 index_base=index_base,
             )
         )
+        # Displacement profile metrics are temporarily disabled.
+        # metrics.update(
+        #     pack_displacement_profile_outputs(
+        #         context.artery_segment_result,
+        #         context.vein_segment_result,
+        #         cycle_boundaries,
+        #         index_base=index_base,
+        #     )
+        # )
         metrics.update(
-            pack_displacement_profile_outputs(
+            pack_displacement_magnitude_outputs(
+                context.artery_segment_result,
+                context.vein_segment_result,
+                cycle_boundaries,
+                index_base=index_base,
+            )
+        )
+        metrics.update(
+            pack_cross_section_displacement_profile_outputs(
                 context.artery_segment_result,
                 context.vein_segment_result,
                 cycle_boundaries,

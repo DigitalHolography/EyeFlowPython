@@ -35,6 +35,7 @@ from pipelines.waveform_velocity_core.figures.profiles import (  # noqa: E402
     _positive_focused_limits,
     export_cross_section_profile_artifacts,
 )
+from pipelines.waveform_velocity.flow_asymmetry import pack_flow_asymmetry_outputs  # noqa: E402
 from pipelines.waveform_velocity.profiles import (  # noqa: E402
     pack_cross_section_profile_outputs,
 )
@@ -144,6 +145,54 @@ class CrossSectionProfilePackingTests(unittest.TestCase):
             for vessel in ("Artery", "Vein"):
                 root = f"Processing/VelocityProfiles/{vessel}"
                 self.assertNotIn(f"{root}/RawProfile", h5)
+                self.assertNotIn(f"{root}/FlowAsymmetry", h5)
+
+    def test_flow_asymmetry_hdf5_values_dimensions_and_windows(self) -> None:
+        segments = _segments(radius_count=2, branch_count=1)
+        empty = _segments(radius_count=2, branch_count=0)
+        schema = EyeFlowOutputPaths.active()
+        root = schema.artery_velocity_profiles.flow_asymmetry_root
+        outputs = pack_flow_asymmetry_outputs(root, segments, [0, 2, 5], index_base=0)
+        outputs.update(
+            pack_flow_asymmetry_outputs(
+                schema.vein_velocity_profiles.flow_asymmetry_root,
+                empty,
+                [0, 2, 5],
+                index_base=0,
+            )
+        )
+        self.assertEqual("Processing/VelocityProfiles/Artery/FlowAsymmetry", root)
+        with h5py.File("asymmetry.h5", "w", driver="core", backing_store=False) as h5:
+            for path, dataset in outputs.items():
+                write_value_dataset(h5, path, dataset)
+            series = h5[f"{root}/A/value"]
+            self.assertEqual((4, 2, 1, 2), series.shape)
+            self.assertEqual(["time", "beat", "branch", "radius"], list(series.attrs["dimDesc"]))
+            self.assertEqual("1", series.attrs["unit"])
+            self.assertEqual("positive_x_minus_negative_x", series.attrs["side_convention"])
+            self.assertEqual(1, series.attrs["early_window_stop_index_exclusive"])
+            self.assertEqual(3, series.attrs["late_window_start_index"])
+            self.assertEqual("full_beat_mean", series.attrs["temporal_centering"])
+            mean = h5[f"{root}/A_mean/value"][...]
+            power = h5[f"{root}/p_A/value"][...]
+            np.testing.assert_allclose(mean, np.mean(series[...], axis=0), atol=1e-8)
+            np.testing.assert_allclose(power, (series[...] - mean[None]) ** 2, atol=1e-8)
+            np.testing.assert_allclose(
+                h5[f"{root}/A_RMS/value"][...] ** 2,
+                mean**2 + h5[f"{root}/a/value"][...] ** 2,
+                atol=1e-8,
+            )
+            for name in ("A_mean", "A_RMS", "a", "a_early", "a_late", "R_a"):
+                dataset = h5[f"{root}/{name}/value"]
+                self.assertEqual((2, 1, 2), dataset.shape)
+                self.assertEqual(["beat", "branch", "radius"], list(dataset.attrs["dimDesc"]))
+            np.testing.assert_array_equal(h5[f"{root}/N_t/value"][...], 4)
+            for name in ("FFA", "FFAR", "PFA"):
+                dataset = h5[f"{root}/{name}/value"]
+                self.assertEqual((), dataset.shape)
+                self.assertEqual("branch_then_beat_then_radius", dataset.attrs["aggregation_order"])
+                empty_root = schema.vein_velocity_profiles.flow_asymmetry_root
+                self.assertTrue(np.isnan(h5[f"{empty_root}/{name}/value"][()]))
 
     def test_profile_time_axis_matches_standard_per_beat_interpolation(self) -> None:
         segments = _segments(radius_count=1, branch_count=1)

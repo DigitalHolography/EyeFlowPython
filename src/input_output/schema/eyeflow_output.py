@@ -81,6 +81,8 @@ class VelocityProfileOutputPaths:
     transverse_velocity_profile_masked: str
     longitudinal_velocity_profile_unmasked: str
     longitudinal_velocity_profile_masked: str
+    flow_asymmetry_root: str
+
 
 @dataclass(frozen=True)
 class HeartbeatOutputPaths:
@@ -159,6 +161,7 @@ def _velocity_profile_paths(
         longitudinal_velocity_profile_masked=(
             f"{root}/Longitudinal{velocity_profile_name}Masked/value"
         ),
+        flow_asymmetry_root=f"{root}/FlowAsymmetry",
     )
 
 

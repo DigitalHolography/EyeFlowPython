@@ -11,6 +11,11 @@ import numpy as np
 from scipy import ndimage as ndi
 from scipy import special
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 from calculations.compute_backend import optional_cupy_backend
 from calculations.math import (
     nanmean_float32,
@@ -93,6 +98,10 @@ class CrossSectionDisplacementResult:
     displacement: np.ndarray
     safe_displacement: np.ndarray
     displacement_maps_per_segment: np.ndarray | None
+    transverse_displacement_profiles_unmasked: np.ndarray
+    transverse_displacement_profiles_masked: np.ndarray
+    longitudinal_displacement_profiles_unmasked: np.ndarray
+    longitudinal_displacement_profiles_masked: np.ndarray
     x_sum_displacement_profile: np.ndarray
     y_sum_displacement_profile: np.ndarray
     cross_sectional_radial_movement_amplitude: np.ndarray
@@ -188,6 +197,10 @@ class _DisplacementProfileMeasurement:
 class _CrossSectionDisplacementMeasurement:
     waveform: _DisplacementProfileMeasurement
     vectors: np.ndarray
+    transverse_profiles_unmasked: np.ndarray
+    transverse_profiles_masked: np.ndarray
+    longitudinal_profiles_unmasked: np.ndarray
+    longitudinal_profiles_masked: np.ndarray
     summed_displacement_xy: np.ndarray
     radial_movement_amplitude: np.ndarray
     radial_asymmetry_index: np.ndarray
@@ -327,6 +340,10 @@ class _CrossSectionDisplacementBuffers:
     displacement: np.ndarray
     safe_displacement: np.ndarray
     displacement_maps_per_segment: np.ndarray | None
+    transverse_displacement_profiles_unmasked: np.ndarray
+    transverse_displacement_profiles_masked: np.ndarray
+    longitudinal_displacement_profiles_unmasked: np.ndarray
+    longitudinal_displacement_profiles_masked: np.ndarray
     x_sum_displacement_profile: np.ndarray
     y_sum_displacement_profile: np.ndarray
     cross_sectional_radial_movement_amplitude: np.ndarray
@@ -352,10 +369,15 @@ class _CrossSectionDisplacementBuffers:
         def filled(shape):
             return np.full(shape, np.nan, dtype=np.float32)
 
+        profile_shape = (*signal_shape, _ROTATED_SUBSTACK_SIDE)
         return cls(
             displacement=filled(signal_shape),
             safe_displacement=filled(signal_shape),
             displacement_maps_per_segment=(filled(map_shape) if retain_maps else None),
+            transverse_displacement_profiles_unmasked=filled(profile_shape),
+            transverse_displacement_profiles_masked=filled(profile_shape),
+            longitudinal_displacement_profiles_unmasked=filled(profile_shape),
+            longitudinal_displacement_profiles_masked=filled(profile_shape),
             x_sum_displacement_profile=filled(signal_shape),
             y_sum_displacement_profile=filled(signal_shape),
             cross_sectional_radial_movement_amplitude=filled(signal_shape),
@@ -1004,6 +1026,18 @@ def _store_displacement_measurement(
     buffers.safe_displacement[index] = measurement.waveform.safe_displacement
     if buffers.displacement_maps_per_segment is not None:
         buffers.displacement_maps_per_segment[index] = measurement.vectors
+    buffers.transverse_displacement_profiles_unmasked[index] = (
+        measurement.transverse_profiles_unmasked
+    )
+    buffers.transverse_displacement_profiles_masked[index] = (
+        measurement.transverse_profiles_masked
+    )
+    buffers.longitudinal_displacement_profiles_unmasked[index] = (
+        measurement.longitudinal_profiles_unmasked
+    )
+    buffers.longitudinal_displacement_profiles_masked[index] = (
+        measurement.longitudinal_profiles_masked
+    )
     buffers.x_sum_displacement_profile[index] = (
         measurement.summed_displacement_xy[:, 0]
     )
@@ -1063,6 +1097,18 @@ def _displacement_result_from_buffers(
         displacement=buffers.displacement,
         safe_displacement=buffers.safe_displacement,
         displacement_maps_per_segment=buffers.displacement_maps_per_segment,
+        transverse_displacement_profiles_unmasked=(
+            buffers.transverse_displacement_profiles_unmasked
+        ),
+        transverse_displacement_profiles_masked=(
+            buffers.transverse_displacement_profiles_masked
+        ),
+        longitudinal_displacement_profiles_unmasked=(
+            buffers.longitudinal_displacement_profiles_unmasked
+        ),
+        longitudinal_displacement_profiles_masked=(
+            buffers.longitudinal_displacement_profiles_masked
+        ),
         x_sum_displacement_profile=buffers.x_sum_displacement_profile,
         y_sum_displacement_profile=buffers.y_sum_displacement_profile,
         cross_sectional_radial_movement_amplitude=(
@@ -1273,6 +1319,12 @@ def _measure_cross_section_displacement(
         vectors,
         work.rotated_mask,
     )
+    (
+        transverse_profiles_unmasked,
+        transverse_profiles_masked,
+        longitudinal_profiles_unmasked,
+        longitudinal_profiles_masked,
+    ) = _displacement_profiles(vectors, work.rotated_mask)
     c1, c2 = work.limits
     return _CrossSectionDisplacementMeasurement(
         waveform=_displacement_profile_measurement(
@@ -1282,6 +1334,10 @@ def _measure_cross_section_displacement(
             mask=work.rotated_mask,
         ),
         vectors=vectors,
+        transverse_profiles_unmasked=transverse_profiles_unmasked,
+        transverse_profiles_masked=transverse_profiles_masked,
+        longitudinal_profiles_unmasked=longitudinal_profiles_unmasked,
+        longitudinal_profiles_masked=longitudinal_profiles_masked,
         summed_displacement_xy=_nansum_float32(
             vectors,
             axis=(1, 2),
@@ -1320,6 +1376,39 @@ def _cross_sectional_radial_metrics(
     return (
         amplitude.astype(np.float32, copy=False),
         asymmetry.astype(np.float32, copy=False),
+    )
+
+
+def _displacement_profiles(
+    rotated_vectors: np.ndarray,
+    vessel_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Project displacement magnitudes using the velocity-profile reductions."""
+
+    if cv2 is None:
+        raise RuntimeError("OpenCV is required for displacement profiles.")
+    magnitude = np.hypot(
+        rotated_vectors[..., 0],
+        rotated_vectors[..., 1],
+    ).astype(np.float32, copy=False)
+    transverse_unmasked, longitudinal_unmasked = (
+        _transverse_and_longitudinal_profiles(magnitude)
+    )
+    dilated_mask = cv2.dilate(
+        np.asarray(vessel_mask, dtype=np.uint8),
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=20,
+    ).astype(bool)
+    masked_magnitude = magnitude.copy()
+    masked_magnitude[:, ~dilated_mask] = np.nan
+    transverse_masked, longitudinal_masked = (
+        _transverse_and_longitudinal_profiles(masked_magnitude)
+    )
+    return (
+        transverse_unmasked,
+        transverse_masked,
+        longitudinal_unmasked,
+        longitudinal_masked,
     )
 
 
@@ -2082,8 +2171,9 @@ def _frame_velocities(
     c2: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     rotated = _rotate_stack_with_nan(sub_stack, angle)
-    transverse_profiles = nanmean_float32(rotated, axis=1)
-    longitudinal_profiles = nanmean_float32(rotated, axis=2)
+    transverse_profiles, longitudinal_profiles = (
+        _transverse_and_longitudinal_profiles(rotated)
+    )
     raw = nanmean_float32(transverse_profiles[:, c1 : c2 + 1], axis=1)
     raw = np.where(np.isnan(raw), np.float32(0.0), raw).astype(
         np.float32,
@@ -2096,6 +2186,15 @@ def _frame_velocities(
         transverse_profiles,
         longitudinal_profiles,
         rotated,
+    )
+
+
+def _transverse_and_longitudinal_profiles(
+    rotated_stack: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    return (
+        nanmean_float32(rotated_stack, axis=1),
+        nanmean_float32(rotated_stack, axis=2),
     )
 
 

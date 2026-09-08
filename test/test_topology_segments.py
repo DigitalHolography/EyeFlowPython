@@ -35,6 +35,8 @@ class SegmentTopologyTests(unittest.TestCase):
         self.assertEqual((20.0, 20.0), topology.optic_disc_center_xy)
         self.assertEqual((2, 2, 2), topology.segment_centers_xy.shape)
         self.assertEqual((2, 2, 7, 7), topology.segment_masks.shape)
+        self.assertEqual((41, 41), topology.centerline.shape)
+        self.assertEqual(np.bool_, topology.centerline.dtype)
         self.assertEqual(7, topology.window_side_pixels)
         self.assertTrue(np.all(topology.valid_segments))
 
@@ -71,6 +73,7 @@ def _edge_topology() -> SegmentTopology:
         spatial_shape=(4, 5),
         optic_disc_center_xy=(2.0, 2.0),
         labels=np.ones((4, 5), dtype=np.int32),
+        centerline=np.ones((4, 5), dtype=bool),
         branch_ids=np.asarray([1], dtype=np.int32),
         annulus_masks=np.ones((1, 4, 5), dtype=bool),
         segment_masks=np.ones((1, 1, 3, 3), dtype=bool),

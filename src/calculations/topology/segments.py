@@ -16,12 +16,14 @@ class SegmentTopology:
     """Map-independent locations of vessel segments.
 
     Arrays indexed by segment use ``(annulus, branch, ...)`` ordering.
+    ``centerline`` is the full-frame skeleton used during branch identification.
     ``segment_masks`` are fixed-size local masks rather than full-frame masks.
     """
 
     spatial_shape: tuple[int, int]
     optic_disc_center_xy: tuple[float, float]
     labels: np.ndarray
+    centerline: np.ndarray
     branch_ids: np.ndarray
     annulus_masks: np.ndarray
     segment_masks: np.ndarray
@@ -130,6 +132,7 @@ def _build_segment_topology_from_center(
     window_side_pixels: int | None,
 ) -> SegmentTopology:
     branches = label_vessel_branches(vessel_mask, optic_disc_center_xy, settings)
+    centerline = branches.stages.skeleton
     annuli = section_masks(vessel_mask.shape, optic_disc_center_xy, settings)
     side = (
         _segment_window_side(
@@ -152,7 +155,8 @@ def _build_segment_topology_from_center(
     for ring_index, annulus in enumerate(annuli):
         for branch_index, branch_id in enumerate(branches.branch_ids):
             mask = annulus & (branches.labels == int(branch_id))
-            center = _segment_center_xy(mask)
+            segment_centerline = centerline & mask
+            center = _segment_center_xy(mask, segment_centerline)
             if center is None:
                 continue
             segment_bounds = _centered_window_bounds(vessel_mask.shape, center, side)
@@ -169,6 +173,7 @@ def _build_segment_topology_from_center(
         spatial_shape=tuple(vessel_mask.shape),
         optic_disc_center_xy=tuple(float(value) for value in optic_disc_center_xy),
         labels=branches.labels,
+        centerline=centerline,
         branch_ids=branches.branch_ids,
         annulus_masks=annuli,
         segment_masks=masks,
@@ -188,12 +193,17 @@ def _mask_center_xy(
     return float(center_x), float(center_y)
 
 
-def _segment_center_xy(mask: np.ndarray) -> tuple[int, int] | None:
-    labeled, count = ndi.label(mask, structure=np.ones((3, 3), dtype=np.uint8))
-    if count == 0:
+def _segment_center_xy(
+    segment_mask: np.ndarray,
+    segment_centerline: np.ndarray,
+) -> tuple[int, int] | None:
+    source = segment_centerline if np.any(segment_centerline) else segment_mask
+    if not np.any(source):
         return None
-    center_y, center_x = ndi.center_of_mass(mask, labeled, 1)
-    return int(np.floor(center_x + 0.5)), int(np.floor(center_y + 0.5))
+    point_y, point_x = np.nonzero(source)
+    center_x = int(np.floor(np.median(point_x) + 0.5))
+    center_y = int(np.floor(np.median(point_y) + 0.5))
+    return center_x, center_y
 
 
 def _segment_window_side(

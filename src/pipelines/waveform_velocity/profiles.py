@@ -8,6 +8,7 @@ from calculations.blood_flow_velocity.cross_section.profile_processing import (
     interpolate_velocity_profiles_per_beat,
 )
 from calculations.topology import mean_profiles, profile_deviation_power
+from calculations.topology.profiles import fit_inverse_parabola_profiles_with_roots
 from input_output.schema import EyeFlowOutputPaths, VelocityProfileOutputPaths
 from pipeline_engine.base import DatasetValue
 
@@ -374,6 +375,45 @@ def _pack_vessel_profiles(
     *,
     index_base: int,
 ) -> dict[str, object]:
+    transverse_masked = np.asarray(
+        segments.transverse_velocity_profiles_masked,
+        dtype=np.float32,
+    )
+    transverse_fitted_profiles, transverse_fit_roots = (
+        fit_inverse_parabola_profiles_with_roots(
+            transverse_masked,
+            x_values=np.asarray(segments.profile_x_micrometers, dtype=np.float32),
+        )
+    )
+    transverse_fit = _profile_dataset(
+        transverse_fitted_profiles,
+        cycle_boundary_indexes,
+        index_base=index_base,
+        spatial_axis="x",
+    )
+    transverse_fit.attrs.update(
+        {
+            "fit_model": "a*x^2 + b*x + c",
+            "fit_constraint": "a < 0",
+            "fit_source": "TransverseVelocityProfileMasked",
+            "fit_timing": "per_source_frame_before_beat_interpolation",
+        }
+    )
+    transverse_fit_roots_per_beat = interpolate_velocity_profiles_per_beat(
+        transverse_fit_roots,
+        cycle_boundary_indexes,
+        index_base=index_base,
+    )
+    transverse_fit_x1 = _profile_fit_root_dataset(
+        transverse_fit_roots_per_beat[0],
+        transverse_masked.shape[-1],
+        root_name="X1",
+    )
+    transverse_fit_x2 = _profile_fit_root_dataset(
+        transverse_fit_roots_per_beat[1],
+        transverse_masked.shape[-1],
+        root_name="X2",
+    )
     outputs = {
         paths.transverse_velocity_profile_unmasked: _profile_dataset(
             np.asarray(segments.velocity_profiles, dtype=np.float32),
@@ -381,10 +421,7 @@ def _pack_vessel_profiles(
             index_base=index_base,
         ),
         paths.transverse_velocity_profile_masked: _profile_dataset(
-            np.asarray(
-                segments.transverse_velocity_profiles_masked,
-                dtype=np.float32,
-            ),
+            transverse_masked,
             cycle_boundary_indexes,
             index_base=index_base,
             spatial_axis="x",
@@ -407,6 +444,9 @@ def _pack_vessel_profiles(
             index_base=index_base,
             spatial_axis="y",
         ),
+        _transverse_profile_fit_path(paths): transverse_fit,
+        _transverse_profile_fit_path(paths, suffix="X1"): transverse_fit_x1,
+        _transverse_profile_fit_path(paths, suffix="X2"): transverse_fit_x2,
     }
     # These metrics belong to displacement, so disable their velocity export.
     # outputs.update(
@@ -418,6 +458,39 @@ def _pack_vessel_profiles(
     #     )
     # )
     return outputs
+
+
+def _profile_fit_root_dataset(
+    roots_per_beat: np.ndarray,
+    x_count: int,
+    *,
+    root_name: str,
+) -> DatasetValue:
+    data = np.broadcast_to(
+        roots_per_beat[None, ...],
+        (x_count, *roots_per_beat.shape),
+    )
+    return DatasetValue(
+        data=data,
+        attrs={
+            "unit": "micrometers",
+            "dimDesc": ["x", "time", "beat", "branch", "radius"],
+            "value_semantics": f"{root_name}_x_axis_zero_of_TransverseProfileFit",
+            "root_order": "X1 <= X2",
+            "broadcast_axis": "x",
+            "fit_timing": "per_source_frame_before_beat_interpolation",
+        },
+        h5_options=_profile_h5_options(data.shape),
+    )
+
+
+def _transverse_profile_fit_path(
+    paths: VelocityProfileOutputPaths,
+    *,
+    suffix: str = "",
+) -> str:
+    profile_root = paths.transverse_velocity_profile_masked.rsplit("/", 2)[0]
+    return f"{profile_root}/TransverseProfileFit{suffix}/value"
 
 
 def _profile_dataset(

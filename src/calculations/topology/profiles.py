@@ -25,6 +25,108 @@ def longitudinal_profiles(
     return nanmean_float32(_masked_segments(segments, segment_masks), axis=-1)
 
 
+def fit_inverse_parabola_profiles(
+    profiles,
+    x_values: np.ndarray | None = None,
+) -> np.ndarray:
+    """Fit a downward-opening quadratic to every profile along its last axis.
+
+    Every combination of leading indexes is fitted independently, so the
+    function can be used with any segment-array layout. Only finite samples
+    participate in a fit. Profiles with fewer than three usable samples, a
+    rank-deficient fit, or a non-negative quadratic coefficient remain NaN.
+
+    The fitted quadratic is evaluated at every supplied X value and the
+    returned array has the same shape as ``profiles``.
+    """
+
+    fitted, _ = fit_inverse_parabola_profiles_with_roots(
+        profiles,
+        x_values=x_values,
+    )
+    return fitted
+
+
+def fit_inverse_parabola_profiles_with_roots(
+    profiles,
+    x_values: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit inverse parabolas and return their ordered X-axis roots.
+
+    The fitted profiles have the same shape as ``profiles``. The roots have
+    shape ``(*profiles.shape[:-1], 2)`` and are ordered from lowest to highest
+    X value. Fits without real roots retain NaN root values.
+    """
+
+    values = np.asarray(profiles, dtype=np.float32)
+    if values.ndim == 0:
+        raise ValueError("profiles must have a spatial sample axis.")
+
+    sample_count = values.shape[-1]
+    if x_values is None:
+        x = np.linspace(-1.0, 1.0, sample_count, dtype=np.float64)
+    else:
+        x = np.asarray(x_values, dtype=np.float64)
+        if x.ndim != 1 or x.shape[0] != sample_count:
+            raise ValueError(
+                "x_values must be one-dimensional and match the profile "
+                "spatial sample count."
+            )
+
+    fitted = np.full(values.shape, np.nan, dtype=np.float32)
+    roots = np.full((*values.shape[:-1], 2), np.nan, dtype=np.float32)
+    if sample_count < 3 or values.size == 0:
+        return fitted, roots
+
+    finite_x = np.isfinite(x)
+    flat_values = values.reshape(-1, sample_count)
+    flat_fitted = fitted.reshape(-1, sample_count)
+    flat_roots = roots.reshape(-1, 2)
+    for profile_index, profile in enumerate(flat_values):
+        fit_samples = finite_x & np.isfinite(profile)
+        if np.count_nonzero(fit_samples) < 3:
+            continue
+
+        fit_x = x[fit_samples]
+        design = np.column_stack((fit_x * fit_x, fit_x, np.ones_like(fit_x)))
+        coefficients, _, rank, _ = np.linalg.lstsq(
+            design,
+            profile[fit_samples].astype(np.float64),
+            rcond=None,
+        )
+        if rank < 3 or not np.all(np.isfinite(coefficients)):
+            continue
+        if coefficients[0] >= 0.0:
+            continue
+
+        evaluation_x = x[finite_x]
+        flat_fitted[profile_index, finite_x] = (
+            coefficients[0] * evaluation_x * evaluation_x
+            + coefficients[1] * evaluation_x
+            + coefficients[2]
+        ).astype(np.float32)
+
+        discriminant = (
+            coefficients[1] * coefficients[1]
+            - 4.0 * coefficients[0] * coefficients[2]
+        )
+        if not np.isfinite(discriminant) or discriminant < 0.0:
+            continue
+        root_delta = np.sqrt(discriminant)
+        profile_roots = np.sort(
+            np.asarray(
+                [
+                    (-coefficients[1] + root_delta) / (2.0 * coefficients[0]),
+                    (-coefficients[1] - root_delta) / (2.0 * coefficients[0]),
+                ],
+                dtype=np.float64,
+            )
+        )
+        flat_roots[profile_index] = profile_roots.astype(np.float32)
+
+    return fitted, roots
+
+
 def mean_profiles(profiles, *, axis: int) -> np.ndarray:
     """Return the NaN-aware mean of every profile along one named axis."""
 

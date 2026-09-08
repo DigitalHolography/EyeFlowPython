@@ -27,8 +27,10 @@ from calculations.topology import (
     SegmentRingSettings,
     annulus_mask,
     label_vessel_branches,
+    longitudinal_profiles as calculate_longitudinal_profiles,
     optic_disc_center_yx,
     section_masks,
+    transverse_profiles as calculate_transverse_profiles,
 )
 
 from runtime_limits import cap_parallel_jobs
@@ -1393,9 +1395,8 @@ def _displacement_profiles(
         rotated_vectors[..., 0],
         rotated_vectors[..., 1],
     ).astype(np.float32, copy=False)
-    transverse_unmasked, longitudinal_unmasked = (
-        _transverse_and_longitudinal_profiles(magnitude)
-    )
+    transverse_unmasked = calculate_transverse_profiles(magnitude)
+    longitudinal_unmasked = calculate_longitudinal_profiles(magnitude)
     dilated_mask = cv2.dilate(
         np.asarray(vessel_mask, dtype=np.uint8),
         np.ones((3, 3), dtype=np.uint8),
@@ -1403,9 +1404,8 @@ def _displacement_profiles(
     ).astype(bool)
     masked_magnitude = magnitude.copy()
     masked_magnitude[:, ~dilated_mask] = np.nan
-    transverse_masked, longitudinal_masked = (
-        _transverse_and_longitudinal_profiles(masked_magnitude)
-    )
+    transverse_masked = calculate_transverse_profiles(masked_magnitude)
+    longitudinal_masked = calculate_longitudinal_profiles(masked_magnitude)
     return (
         transverse_unmasked,
         transverse_masked,
@@ -2173,9 +2173,8 @@ def _frame_velocities(
     c2: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     rotated = _rotate_stack_with_nan(sub_stack, angle)
-    transverse_profiles, longitudinal_profiles = (
-        _transverse_and_longitudinal_profiles(rotated)
-    )
+    transverse_profiles = calculate_transverse_profiles(rotated)
+    longitudinal_profiles = calculate_longitudinal_profiles(rotated)
     raw = nanmean_float32(transverse_profiles[:, c1 : c2 + 1], axis=1)
     raw = np.where(np.isnan(raw), np.float32(0.0), raw).astype(
         np.float32,
@@ -2191,13 +2190,6 @@ def _frame_velocities(
     )
 
 
-def _transverse_and_longitudinal_profiles(
-    rotated_stack: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    return (
-        nanmean_float32(rotated_stack, axis=1),
-        nanmean_float32(rotated_stack, axis=2),
-    )
 
 
 def _rotate_stack_with_nan(sub_stack: np.ndarray, angle: float) -> np.ndarray:

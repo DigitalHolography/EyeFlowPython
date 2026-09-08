@@ -7,7 +7,7 @@ import numpy as np
 from calculations.blood_flow_velocity.cross_section.profile_processing import (
     interpolate_velocity_profiles_per_beat,
 )
-from calculations.math import nanmean_float32
+from calculations.topology import mean_profiles, profile_deviation_power
 from input_output.schema import EyeFlowOutputPaths, VelocityProfileOutputPaths
 from pipeline_engine.base import DatasetValue
 
@@ -451,7 +451,7 @@ def _profile_dataset(
 def _temporally_meaned_profile_dataset(profile: DatasetValue) -> DatasetValue:
     """Average an interpolated profile over time within each beat."""
 
-    data = nanmean_float32(np.asarray(profile.data), axis=1)
+    data = mean_profiles(profile.data, axis=1)
     attrs = dict(profile.attrs or {})
     dim_desc = list(attrs.get("dimDesc", ()))
     if len(dim_desc) < 2 or dim_desc[1] != "time":
@@ -474,13 +474,7 @@ def _temporally_centered_profile_power_dataset(
 
     values = np.asarray(profile.data, dtype=np.float32)
     mean = np.asarray(temporal_mean.data, dtype=np.float32)
-    expected_mean_shape = (values.shape[0], *values.shape[2:])
-    if mean.shape != expected_mean_shape:
-        raise ValueError(
-            "temporal mean shape must match the profile without its time axis."
-        )
-    centered = values - mean[:, None, ...]
-    data = np.square(centered).astype(np.float32, copy=False)
+    data = profile_deviation_power(values, mean, axis=1)
     attrs = dict(profile.attrs or {})
     attrs["unit"] = "pixels^2"
     attrs["formula"] = "(D(t) - mean_t(D(t)))**2"

@@ -15,9 +15,9 @@ if str(SRC_DIR) not in sys.path:
 from calculations.blood_flow_velocity.cross_section import (  # noqa: E402
     CrossSectionSignalSettings,
     CrossSectionTopology,
-    SegmentRingSettings,
     generate_cross_section_signals,
 )
+from calculations.topology import SegmentRingSettings  # noqa: E402
 from calculations.blood_flow_velocity.cross_section.generate_cross_section_signals import (  # noqa: E402
     _correct_displacement_basis,
     _cross_sectional_radial_metrics,

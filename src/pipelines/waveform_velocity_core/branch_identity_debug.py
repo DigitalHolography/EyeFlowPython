@@ -5,11 +5,9 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage as ndi
 
-from calculations.blood_flow_velocity.cross_section import (
+from calculations.topology import (
     BranchIdentityStages,
     SegmentRingSettings,
-)
-from calculations.blood_flow_velocity.cross_section.segment_geometry import (
     annulus_mask,
 )
 

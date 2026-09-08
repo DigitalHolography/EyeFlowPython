@@ -7,7 +7,7 @@ from time import perf_counter
 import numpy as np
 from scipy import ndimage as ndi
 
-from calculations.blood_flow_velocity.cross_section.segment_geometry import annulus_mask
+from calculations.topology import annulus_mask
 from utils.logger import Logger
 
 SCRATCH_FRAME_CHUNK_SIZE = 32

@@ -5,7 +5,6 @@ from .cross_section.generate_cross_section_signals import (
     CrossSectionSignalResult,
     CrossSectionSignalSettings,
 )
-from .cross_section.segment_geometry import SegmentRingSettings
 from .cross_section.segment_velocity_signals import segment_velocity_results
 from .signal_analysis.heartbeat import (
     HeartbeatAnalysisResult,
@@ -56,7 +55,6 @@ __all__ = [
     "PerBeatSignalAnalysisResult",
     "aggregate_per_beat_segment_analysis",
     "PulseMetricData",
-    "SegmentRingSettings",
     "SpectralHeartbeatResult",
     "SystoleDetectionResult",
     "VenousWaveformAnalysis",

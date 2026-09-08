@@ -22,15 +22,17 @@ from calculations.math import (
     rotate_array_threshold,
     rotate_image_with_nan,
 )
-from runtime_limits import cap_parallel_jobs
-from .branch_identity import BranchIdentityResult, label_vessel_branches
-from .profile_processing import ProfileData, process_velocity_profiles
-from .segment_geometry import (
+from calculations.topology import (
+    BranchIdentityResult,
     SegmentRingSettings,
     annulus_mask,
+    label_vessel_branches,
     optic_disc_center_yx,
     section_masks,
 )
+
+from runtime_limits import cap_parallel_jobs
+from .profile_processing import ProfileData, process_velocity_profiles
 
 
 @dataclass(frozen=True)

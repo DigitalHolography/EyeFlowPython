@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from calculations.blood_flow_velocity.cross_section.segment_geometry import (
+from calculations.topology import (
     optic_disc_center_yx,
 )
 from input_output.schema import EyeFlowOutputPaths

@@ -9,11 +9,11 @@ from calculations.blood_flow_velocity import (
     CrossSectionSignalResult,
     HeartbeatAnalysisResult,
     PerBeatAnalysisInput,
-    SegmentRingSettings,
     segment_velocity_results,
     spectral_heartbeat_analysis,
 )
-from calculations.blood_flow_velocity.cross_section.segment_geometry import (
+from calculations.topology import (
+    SegmentRingSettings,
     image_half_diagonal,
 )
 from input_output import EyeFlowOutputPaths

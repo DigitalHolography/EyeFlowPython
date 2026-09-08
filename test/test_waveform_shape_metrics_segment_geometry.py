@@ -19,7 +19,7 @@ from calculations.blood_flow_velocity import (  # noqa: E402
     CrossSectionSignalSettings,
     segment_velocity_results,
 )
-from calculations.blood_flow_velocity.cross_section.branch_identity import (  # noqa: E402
+from calculations.topology.branch_identity import (  # noqa: E402
     _branch_identity_stages,
 )
 from calculations.blood_flow_velocity.cross_section.generate_cross_section_signals import (  # noqa: E402
@@ -39,7 +39,7 @@ from calculations.blood_flow_velocity.cross_section.generate_cross_section_signa
     _rotate_stack_with_nan,
     _sample_nanstd_axis0,
 )
-from calculations.blood_flow_velocity.cross_section.segment_geometry import (  # noqa: E402
+from calculations.topology import (  # noqa: E402
     ring_masks,
     section_masks,
 )
@@ -157,23 +157,23 @@ class SegmentCenterTests(unittest.TestCase):
         )
 
         with patch(
-            "calculations.blood_flow_velocity.cross_section.branch_identity."
+            "calculations.topology.branch_identity."
             "annulus_mask",
             return_value=section,
         ), patch(
-            "calculations.blood_flow_velocity.cross_section.branch_identity."
+            "calculations.topology.branch_identity."
             "skeletonize",
             return_value=skeleton,
         ), patch(
-            "calculations.blood_flow_velocity.cross_section.branch_identity."
+            "calculations.topology.branch_identity."
             "_branch_points",
             return_value=np.zeros_like(vessel),
         ), patch(
-            "calculations.blood_flow_velocity.cross_section.branch_identity."
+            "calculations.topology.branch_identity."
             "_remove_small",
             side_effect=lambda mask, _min_area: mask,
         ), patch(
-            "calculations.blood_flow_velocity.cross_section.branch_identity."
+            "calculations.topology.branch_identity."
             "watershed",
             return_value=watershed_labels,
         ):

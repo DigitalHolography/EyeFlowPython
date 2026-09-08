@@ -7,6 +7,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from calculations.compute_backend import optional_cupy_backend
+from calculations.topology import SegmentRingSettings
 from utils.logger import Logger
 
 from .generate_cross_section_signals import (
@@ -17,7 +18,6 @@ from .generate_cross_section_signals import (
     _prepare_cross_section_geometry,
     _validate_velocity_map,
 )
-from .segment_geometry import SegmentRingSettings
 
 
 def segment_velocity_inputs(
